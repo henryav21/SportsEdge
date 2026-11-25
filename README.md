@@ -35,7 +35,7 @@ odds, injuries and weather and reruns everything. While it is open it also looks
 |---|---|
 | **Today** | Value bets and most-likely picks as cards (each with its win chance as a ring), the best parlays by day, group of games and game, then every game as one block laid out like a sportsbook: the two teams with moneyline, over/under and spread, how far the line has moved since it opened, the game's **top picks**, and its player props underneath, with chips to switch stat. Games that have started sit in their own block with the live score, so a bet already placed can still be recorded. |
 | **Player props** | Every prop line, **by game** (each game a section, grouped by stat or by player) or as a **ranked list** across all games (most likely, value, biggest disagreements). Also the test results for the prop simulator, a form to price a line from your own sportsbook, and the full projection table. |
-| **Live** | Every bet you recorded as it stands right now, pick by pick, with real scores and stat lines, what the bet is worth, and a check on your sportsbook's cash-out offer. Below that, today's scoreboard: every game's score and clock, ESPN's live win chance for games in play, and every player's stats so far. |
+| **Live** | Every bet you recorded as it stands right now, pick by pick, with real scores and stat lines, what the bet is worth, and a check on your sportsbook's cash-out offer. Below that, today's scoreboard: every game's score and clock, ESPN's live win chance for games in play, every player's stats so far, and the sportsbook's live prices. A bet with one pick left gets a hedge worked out. |
 | **Line moves** | How each game's spread, total and moneyline have moved since the sportsbook first posted them: a chart per number for the game you pick, every game ranked by how far it has moved, and the player prop lines that moved most. Also whether the line for each pick in your recorded bets has moved in your favour or against you. |
 | **Results** | How logged picks have done: units won over time, a chart of predicted vs actual win rates, results by list and bet type, closing-line value, and **My bets**. |
 | **How it works** | The steps behind a pick, the game model's record against closing lines, the prop simulator's record against real lines, and every factor's learned weight. |
@@ -88,6 +88,35 @@ that has started moves to **Started games** on the Today page, with the live sco
 so far, and every pick at the last line and price logged before the start. Tap the picks you bet, type the
 odds from your sportsbook's slip, change a line in the slip if yours was different, and record it. The Live
 page then follows the bet like any other.
+
+## Pasting a bet slip
+
+**Paste a slip**, at the top of the bet slip, reads a bet copied as text from your sportsbook (the slip or
+My Bets). It finds the picks, the odds and the stake and fills the bet slip in, ready to check and record.
+- A pick may be on one line ("Jayson Tatum Over 25.5 Points") or spread over several. "25+" is read as over
+  24.5. Spreads, totals and moneylines are matched by team nickname.
+- A line that differs from the tool's is kept as **your line** and recorded as such.
+- Anything that cannot be matched to a pick the tool has (a stat it does not carry, a first-basket bet) is
+  listed as not matched. Nothing is guessed. A screenshot cannot be read, only text.
+
+## Betting during a game
+
+The feed carries the sportsbook's in-game prices for games in play (spread, total, moneyline and
+over/under props), and the Live page shows them on the scoreboard next to the pre-game numbers.
+
+- **The tool does not suggest new live bets.** Its live estimate knows the score, the clock and the box
+  score, and nothing else. The first time it was set against real in-game prices it disagreed with a third
+  of them by a wide margin (for example 89% against the sportsbook's 50% on a spread in a blowout). A gap
+  that size is the estimate being wrong: big leads shrink and starters sit. Showing those as bets would
+  lose money.
+- **It logs them instead.** Each new live price is written beside the tool's estimate to
+  `history/live_log.csv`, so the estimate can be tested against results and given a weight, the way the
+  pre-game model and the prop simulator were.
+- **A hedge is arithmetic, so that is offered.** When a recorded bet has one pick left and its game is on,
+  the bet's card shows how much to stake on the other side, at the live price, to finish with the same
+  amount whichever way it goes. If the live line is not the line you bet, it also shows the stretch where
+  both bets win (a middle) or both lose. The price is prefilled from the feed and can be typed over, since
+  a live price moves faster than any feed.
 
 ## Line moves
 
@@ -328,6 +357,7 @@ edge to flag, and the seasons used.
 | `propcheck.py` | Replays the prop simulators on real past lines and learns their weight |
 | `markets.py`, `parlay.py` | Pricing, market centring, EV, Kelly, parlay search |
 | `plays.py` | Top picks per game and the best parlays per game, group of games and day |
+| `slipread.py` | Reads a bet slip pasted as text and matches its picks to the tool's |
 | `sources.py` | ESPN (schedule, odds, prop lines, injuries), Open-Meteo, The Odds API |
 | `tracker.py` | Logs picks and your bets, settles them, closing-line value, learned prop weight |
 | `live.py` | Live scores and stat lines for open bets, live chances, cash-out check, today's scoreboard |

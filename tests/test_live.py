@@ -180,6 +180,73 @@ class BetAsItStands(unittest.TestCase):
         self.assertEqual((v["legs"][0]["status"], v["legs"][0]["decided"], v["status"]), ("won", True, "won"))
 
 
+class AtALiveLine(unittest.TestCase):
+    def test_a_pick_judged_at_its_own_line_is_unchanged(self):
+        g = game("in", period=2, clock=300, home=60, away=50)
+        l = leg("total", "over", 220.5, p=0.5)
+        self.assertAlmostEqual(live.game_leg_chance("nba", l, g, None)[0], live.game_leg_chance("nba", l, g, None, at=220.5)[0])
+        p = leg("pts", "over", 24.5, p=0.5, pkey="a", proj=25)
+        self.assertAlmostEqual(live.prop_leg_chance(p, 12.0, 0.5)[0], live.prop_leg_chance(p, 12.0, 0.5, at=24.5)[0])
+
+    def test_a_higher_line_is_harder_to_go_over(self):
+        g = game("in", period=2, clock=300, home=60, away=50)
+        l = leg("total", "over", 220.5, p=0.5)
+        self.assertGreater(live.game_leg_chance("nba", l, g, None, at=215.5)[0], live.game_leg_chance("nba", l, g, None, at=228.5)[0])
+        p = leg("pts", "over", 24.5, p=0.5, pkey="a", proj=25)
+        self.assertGreater(live.prop_leg_chance(p, 12.0, 0.5, at=20.5)[0], live.prop_leg_chance(p, 12.0, 0.5, at=30.5)[0])
+        home = leg("spread", "home", -3.5, p=0.5)
+        self.assertGreater(live.game_leg_chance("nba", home, g, None, at=-3.5)[0], live.game_leg_chance("nba", home, g, None, at=-14.5)[0])
+
+
+class Hedge(unittest.TestCase):
+    def _bet(self, key, mk, side, line, payout=19.09, stake=10.0, **kw):
+        return {"status": "live", "open": 1, "payout": payout, "stake": stake,
+                "legs": [{"key": key, "decided": False, "state": "in", "market_key": mk, "side": side, "line": line}], **kw}
+
+    def _row(self, selection, line, odds=-115.0):
+        return {"selection": selection, "line": line, "odds": odds, "dec": 1 + 100 / abs(odds) if odds < 0 else 1 + odds / 100, "book": "live"}
+
+    def test_the_other_side_returns_the_same_either_way(self):
+        h = live.hedge(self._bet("NBA|g|total|over|", "total", "over", 218.5), {"NBA|g|total|under|": self._row("Under 218.5", 218.5)})
+        self.assertAlmostEqual(h["stake"] * (1 + 100 / 115), 19.09, places=6)  # the hedge pays what the bet would have
+        self.assertAlmostEqual(h["locked"], 19.09 - 10.0 - h["stake"], places=6)
+        self.assertIsNone(h["middle"])
+        self.assertIsNone(h["gap"])
+
+    def test_a_line_that_moved_past_yours_leaves_a_middle(self):
+        # holds over 218.5; the live total is 222.5: a finish of 219 to 222 wins both
+        h = live.hedge(self._bet("NBA|g|total|over|", "total", "over", 218.5), {"NBA|g|total|under|": self._row("Under 222.5", 222.5)})
+        self.assertEqual((h["middle"]["lo"], h["middle"]["hi"]), (218.5, 222.5))
+        self.assertAlmostEqual(h["middle"]["profit"], 2 * 19.09 - 10.0 - h["stake"], places=6)
+        self.assertIsNone(h["gap"])
+
+    def test_a_line_that_moved_the_other_way_leaves_a_gap(self):
+        h = live.hedge(self._bet("NBA|g|total|over|", "total", "over", 225.5), {"NBA|g|total|under|": self._row("Under 222.5", 222.5)})
+        self.assertIsNone(h["middle"])
+        self.assertAlmostEqual(h["gap"]["loss"], 10.0 + h["stake"], places=6)  # 223 to 225 loses both
+        under = live.hedge(self._bet("NBA|g|pts|under|a", "pts", "under", 24.5), {"NBA|g|pts|over|a": self._row("A o20.5", 20.5)})
+        self.assertEqual((under["middle"]["lo"], under["middle"]["hi"]), (20.5, 24.5))  # 21 to 24 wins both
+
+    def test_spreads_are_compared_on_the_home_margin(self):
+        # holds the home team -3.5 (needs to win by 4+); live, the away team is +8.5 (wins if home wins by 8 or less)
+        h = live.hedge(self._bet("NBA|g|spread|home|", "spread", "home", -3.5), {"NBA|g|spread|away|": self._row("AWAY +8.5", 8.5)})
+        self.assertEqual((h["middle"]["lo"], h["middle"]["hi"], h["middle"]["unit"]), (3.5, 8.5, "margin"))
+        h = live.hedge(self._bet("NBA|g|spread|home|", "spread", "home", -3.5), {"NBA|g|spread|away|": self._row("AWAY +1.5", 1.5)})
+        self.assertEqual((h["gap"]["lo"], h["gap"]["hi"]), (1.5, 3.5))
+
+    def test_only_a_bet_with_one_pick_left_and_that_game_on(self):
+        rows = {"NBA|g|ml|away|": self._row("AWAY ML", None, 150.0)}
+        ok = self._bet("NBA|g|ml|home|", "ml", "home", None)
+        self.assertIsNotNone(live.hedge(ok, rows))
+        self.assertIsNone(live.hedge(ok, rows)["middle"])  # a moneyline has no line to land between
+        self.assertIsNone(live.hedge({**ok, "open": 2}, rows))
+        self.assertIsNone(live.hedge({**ok, "status": "lost"}, rows))
+        waiting = self._bet("NBA|g|ml|home|", "ml", "home", None)
+        waiting["legs"][0]["state"] = "pre"
+        self.assertIsNone(live.hedge(waiting, rows))
+        self.assertIsNone(live.hedge(ok, {}))  # no live price for the other side
+
+
 class CashOut(unittest.TestCase):
     def test_fair_value_and_the_books_cut(self):
         c = live.cash_out(150, 205, 0.80)

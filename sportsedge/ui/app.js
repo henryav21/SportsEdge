@@ -24,7 +24,9 @@ const S = {
   pv: localStorage.getItem("props_view") || "game", pg: localStorage.getItem("props_group") || "stat", pgOpen: null, // props page: view, grouping, open games
   focusGame: null, focusForm: false,
   odds: null, oddsAt: 0, movesGame: null, plays: null, gparOpen: {},
-  started: [], st: {}, slipLines: {}, boxOpen: {},   // games that have started; per game: chosen stat, "show all"; lines typed in the slip
+  started: [], st: {}, slipLines: {}, boxOpen: {},
+  board: null, hedgeOdds: {},   // live prices for games in play; the odds typed into each hedge box
+  importOpen: false, importText: "", importNote: null,   // paste a slip from the sportsbook   // games that have started; per game: chosen stat, "show all"; lines typed in the slip
   live: null, liveErr: null, liveFirst: {}, offers: JSON.parse(localStorage.getItem("offers") || "{}"), cash: {},
   priceErrors: [],
   pb: { tab: "", game: "", stat: "", q: "", limit: 40 }, // prop board
@@ -199,7 +201,26 @@ async function evalSlip() {
   try {
     S.slipEval = await api("/api/slip", { method: "POST", body: JSON.stringify({ keys: S.slip }) });
   } catch (_) { S.slipEval = null; }
-  S.slipOdds = S.slipEval && S.slipEval.odds != null ? S.slipEval.odds : null;
+  S.slipOdds = S.keepOdds != null ? S.keepOdds : S.slipEval && S.slipEval.odds != null ? S.slipEval.odds : null;
+  S.keepOdds = null;
+}
+
+/* The box for pasting a bet slip, and what was found in the last one pasted. */
+function importBox() {
+  if (!S.importOpen) return "";
+  return `<div class="imp"><label for="impText">Paste your bet slip</label>
+    <textarea id="impText" placeholder="Copy the bet from your sportsbook (the slip, or My Bets) and paste the text here.">${esc(S.importText)}</textarea>
+    <div class="row"><button class="btn primary small" data-act="import-read">Read it</button><button class="btn small ghost" data-act="import-toggle">Cancel</button></div>
+    <div class="hint">Text only: a screenshot cannot be read. Nothing is recorded until you check the picks and press <i>Record bet</i>.</div></div>`;
+}
+function importNote() {
+  const n = S.importNote;
+  if (!n) return "";
+  const miss = (n.unmatched || []).map((u) => `<li>“${esc(u.text)}” <span class="muted">${esc(u.why)}</span></li>`).join("");
+  const head = n.n ? `<b>Read ${n.n} pick${n.n === 1 ? "" : "s"} from your slip${n.odds != null ? `, odds ${fmtOdds(n.odds)}` : ""}${n.stake != null ? `, stake ${money(n.stake, 2)}` : ""}.</b> Check each one, and its line, before recording.`
+    : `<b>No picks could be read from that text.</b> It needs the player or team, over or under, and the number, for a game the tool has.`;
+  return `<div class="imp-note ${n.n && !miss ? "" : "warn"}">${head}${miss ? `<div style="margin-top:4px">Not matched:</div><ul>${miss}</ul>` : ""}
+    ${n.odds == null && n.n ? `<div style="margin-top:4px">No odds found in the text: type them below.</div>` : ""}</div>`;
 }
 
 // ============================================================================ header / status
@@ -1081,7 +1102,9 @@ function liveLoop() {
 async function loadLive() {
   clearTimeout(liveTimer);
   try {
-    S.live = await api("/api/live");
+    const [liveNow, board] = await Promise.all([api("/api/live"), S.page === "live" ? api("/api/live/board").catch(() => null) : Promise.resolve(S.board)]);
+    S.live = liveNow;
+    S.board = board;
     S.liveErr = null;
     for (const b of S.live.bets) if (!(b.id in S.liveFirst)) S.liveFirst[b.id] = b.value;
   } catch (e) { S.liveErr = String(e.message || e); }
@@ -1170,6 +1193,40 @@ function cashBox(b) {
     <div id="cash-${esc(b.id)}">${res}</div></div>`;
 }
 
+/* A bet with one pick left, in play: what staking the other side returns. The price comes from the feed when it
+   has one and can be typed over, because a live price moves faster than any feed. */
+function hedgeFor(b) {
+  if (b.error || b.open !== 1 || b.status === "lost") return null;
+  const leg = b.legs.find((v) => !v.decided);
+  return leg && leg.state === "in" ? leg : null;
+}
+function hedgeCalc(b) {
+  const h = ((S.board && S.board.hedges) || {})[b.id];
+  const odds = parseFloat(S.hedgeOdds[b.id] ?? (h ? h.odds : ""));
+  if (isNaN(odds) || Math.abs(odds) < 100) return `<p class="note" style="margin:8px 0 0">Type the odds your sportsbook shows right now for the other side.</p>`;
+  const H = b.payout / decOf(odds), locked = b.payout - b.stake - H;
+  const span = (x) => `${lineNum(x.lo)} and ${lineNum(x.hi)}`;
+  return `<div class="kvs">
+      <div class="kv"><span class="k">Bet this much on the other side</span><span class="v">${money(H, 2)}</span></div>
+      <div class="kv" title="One of the two bets wins: this is what you are left with after both stakes"><span class="k">Then you finish with, whichever wins</span><span class="v ${cls(locked)}">${locked >= 0 ? "+" : ""}${money(locked, 2)}</span></div>
+      <div class="kv"><span class="k muted">Without a hedge</span><span class="v" style="font-weight:500">+${money(b.profit_if_win, 2)} if it wins · −${money(b.stake, 2)} if it loses</span></div>
+      ${h && h.middle ? `<div class="kv" title="The live line is on the other side of yours, so there is a stretch where both bets win"><span class="k">If the ${h.middle.unit === "margin" ? "home team's winning margin" : "final number"} lands between ${span(h.middle)}: both win</span><span class="v pos">+${money(2 * b.payout - b.stake - H, 2)}</span></div>` : ""}
+      ${h && h.gap ? `<div class="kv" title="The live line has moved past yours, so there is a stretch where both bets lose"><span class="k">If the ${h.gap.unit === "margin" ? "home team's winning margin" : "final number"} lands between ${span(h.gap)}: both lose</span><span class="v neg">−${money(b.stake + H, 2)}</span></div>` : ""}
+    </div>
+    ${locked < 0 && !(h && h.middle) ? `<p class="note" style="margin:6px 0 0">At this price a hedge locks in a loss. It is only worth it to cut the risk of losing the whole stake.</p>` : ""}`;
+}
+function hedgeBox(b) {
+  const leg = hedgeFor(b);
+  if (!leg) return "";
+  const h = ((S.board && S.board.hedges) || {})[b.id];
+  return `<div class="cash hedge"><h3 class="h3">Or hedge it yourself</h3>
+    <p class="note" style="margin:0 0 8px">One pick is left. Betting the other side now, <b>${h ? esc(h.selection) : `against ${esc(leg.selection)}`}</b>, locks in the same result whichever way it goes.
+      ${h ? `The feed shows ${fmtOdds(h.odds)} for it (${esc(h.book)}). Live prices move every few seconds, so` : "The feed has no live price for it, so"} type the odds on your sportsbook.
+      This is often a better deal than the cash-out button.</p>
+    <label class="cash-in">Live odds for the other side<input class="offer" type="number" step="1" inputmode="numeric" data-hedge="${esc(b.id)}" value="${esc(S.hedgeOdds[b.id] ?? (h ? h.odds : ""))}" placeholder="-110"></label>
+    <div id="hedge-${esc(b.id)}">${hedgeCalc(b)}</div></div>`;
+}
+
 function liveBet(b) {
   if (b.error) return `<section class="card"><div class="hd"><h2>${esc(b.label)}</h2></div><div class="bd"><div class="banner warn">This bet could not be read: ${esc(b.error)}</div></div></section>`;
   const pill = { won: ["Won", "r-value"], lost: ["Lost", "r-poor"], push: ["Push: stake returned", "r-fair"], live: [`${b.won} of ${b.n} won · ${b.open} to go`, "r-lean"], pre: ["Not started", "r-fair"] }[b.status] || ["", "r-fair"];
@@ -1187,6 +1244,7 @@ function liveBet(b) {
       <ol class="live-legs">${b.legs.map(liveLeg).join("")}</ol>
       ${b.open && b.p_all > 0 && b.open > 1 ? `<p class="note">The chance everything left wins (${pct(b.p_all, b.p_all < 0.1 ? 1 : 0)}) multiplies the chances above${b.same_game ? ". Some remaining picks are in the same game; they are treated as unrelated here, which can understate or overstate the true chance" : ""}.</p>` : ""}
       ${cashBox(b)}
+      ${hedgeBox(b)}
     </div></section>`;
 }
 
@@ -1201,8 +1259,17 @@ function scoreCard(g) {
       <span class="bar"><span style="width:${(1 - g.home_wp) * 100}%;background:var(--s2)"></span><span style="width:${g.home_wp * 100}%;background:var(--s1)"></span></span><span>${pct(g.home_wp, 0)} ${esc(g.home)}</span></div>
       <div class="sc-note">win chance right now (ESPN's estimate)</div>` : "";
   const late = S.started.find((x) => x.sport === g.sport && x.home === g.home && x.away === g.away);
+  const lb = live && S.board ? (S.board.games || []).find((x) => x.event_id === g.event_id) : null;
+  const L = lb && lb.line ? lb.line : null;
+  const pre = (mk, side) => { const r = lb && (lb.lines || []).find((x) => x.market_key === mk && x.side === side); return r && r.pre_line != null ? r.pre_line : null; };
+  const fav = L && L.spread_home != null ? (L.spread_home < 0 ? `${esc(g.home)} ${signed(L.spread_home, Math.abs(L.spread_home) % 1 ? 1 : 0)}` : L.spread_home > 0 ? `${esc(g.away)} ${signed(-L.spread_home, Math.abs(L.spread_home) % 1 ? 1 : 0)}` : "even") : null;
+  const prices = !L ? "" : `<div class="sc-live-px" title="The sportsbook's in-game prices from the feed. They can lag: check your sportsbook before betting.">
+      <span class="mini-lab" style="margin:0">Live prices${lb.book ? ` · ${esc(String(lb.book).replace(" - Live Odds", ""))}` : ""}</span>
+      ${fav ? `<span>Spread <b>${fav}</b>${pre("spread", "home") != null ? ` <span class="muted">was ${signed(pre("spread", "home"), Math.abs(pre("spread", "home")) % 1 ? 1 : 0)} ${esc(g.home)}</span>` : ""}</span>` : ""}
+      ${L.total != null ? `<span>Total <b>${lineNum(L.total)}</b>${pre("total", "over") != null ? ` <span class="muted">was ${lineNum(pre("total", "over"))}</span>` : ""}</span>` : ""}
+      ${L.ml_home != null && L.ml_away != null ? `<span>To win <b>${esc(g.away)} ${fmtOdds(L.ml_away)}</b> · <b>${esc(g.home)} ${fmtOdds(L.ml_home)}</b></span>` : ""}</div>`;
   return `<article class="sc ${live ? "live" : ""}"><div class="sc-top"><span>${SPORT_ICON[g.sport] || ""} ${state}</span></div>
-    ${row("away", g.away, as)}${row("home", g.home, hs)}${wp}
+    ${row("away", g.away, as)}${row("home", g.home, hs)}${wp}${prices}
     ${g.players && g.players.length ? `<details class="sc-box" data-box="${esc(g.event_id)}" ${S.boxOpen[g.event_id] ? "open" : ""}><summary>Player stats${live ? " so far" : ""}</summary>${boxTable(g)}</details>` : ""}
     ${late && !done ? `<button class="linkish sc-rec" data-act="go-started" data-to="st-${late.sport}-${esc(late.game_id)}">Record a bet on this game</button>` : ""}</article>`;
 }
@@ -1226,7 +1293,10 @@ function scoreboard() {
   if (!games.length) return "";
   const n = games.filter((g) => g.state === "in").length;
   return `<section class="card"><div class="hd"><h2>Today's scoreboard</h2><span class="sub">${n ? `${n} game${n === 1 ? "" : "s"} in play` : "nothing in play right now"} · ${games.length} today</span></div>
-    <div class="bd"><div class="scores">${games.map(scoreCard).join("")}</div></div></section>`;
+    <div class="bd"><div class="scores">${games.map(scoreCard).join("")}</div>
+    ${n ? `<p class="note" style="margin:10px 0 0"><b>About betting live.</b> The live prices shown are the sportsbook's own, from the feed, and can lag. The tool does not suggest new live bets:
+      its live estimate only knows the score, the clock and the box score, and when it was set against real live prices it disagreed with a third of them by a wide margin, which means the estimate is wrong, not the price.
+      It is logging live prices against results so that can be tested. What it can work out exactly is a <b>hedge</b>: it appears on any recorded bet with one pick left.</p>` : ""}</div></section>`;
 }
 
 function pageLive() {
@@ -1582,6 +1652,13 @@ function renderGuide() {
     <h3>During the games</h3>
     <p>The <b>Live</b> page follows every bet you recorded, pick by pick, with real scores and stat lines. If your sportsbook offers a cash-out, type the amount in and the tool compares it with what the bet is worth right now:
       what it would pay, times the chance the remaining picks win. Sportsbooks usually offer less than that. Cashing out can still make sense when the possible win is large next to your bankroll, and the page tells you the amount at which it does.</p>
+    <h3>Betting during a game</h3>
+    <p>The Live page shows the sportsbook's in-game spread, total and moneyline for games in play. The tool does <b>not</b> suggest new live bets: its live estimate is too rough to beat a live price, and it says so rather than guess.
+      What it does work out is a <b>hedge</b>. When a recorded bet has one pick left and that game is on, it shows how much to bet on the other side so you finish with the same amount whichever way it goes,
+      and whether the two lines leave a stretch where both bets win (a middle) or both lose.</p>
+    <h3>Pasting a bet slip</h3>
+    <p><b>Paste a slip</b>, at the top of the bet slip, reads a bet you copied as text from your sportsbook: it finds the picks, the odds and the stake and fills the slip in.
+      Anything it cannot match to a pick the tool knows is listed, not guessed. Check each pick and its line, then record it. A screenshot cannot be read, only text.</p>
     <h3>Recording a bet on a game that has started</h3>
     <p>Once a game starts it leaves the list of games to come, because its prices are no longer on offer. It moves to <b>Started games</b> on the Today page, with every pick at its last number before the start.
       Use that to record a bet you already placed: tap the picks, type the odds from your slip, change a line if yours was different, and record it. The Live page then follows it.</p>
@@ -1869,16 +1946,17 @@ function renderSlip() {
   const legs = S.slip.map((k) => S.legs[k]).filter(Boolean);
   $("#slipToggle").textContent = `Bet slip${legs.length ? ` (${legs.length})` : ""}`;
   $("#slipToggle").classList.toggle("empty", !legs.length && !$("#slip").classList.contains("open"));
-  let html = `<div class="hd"><h2>Bet slip</h2>${legs.length ? `<span class="count">${legs.length}</span><button class="btn small ghost" data-act="clear-slip">Clear</button>` : ""}</div>`;
+  let html = `<div class="hd"><h2>Bet slip</h2>${legs.length ? `<span class="count">${legs.length}</span>` : ""}
+    <button class="btn small ghost" data-act="import-toggle" title="Paste the text of a bet from your sportsbook">Paste a slip</button>${legs.length ? `<button class="btn small ghost" data-act="clear-slip">Clear</button>` : ""}</div>${importBox()}${importNote()}`;
   if (!legs.length) {
     el.innerHTML = html + `<div class="empty"><b>Build a bet here.</b><br>Click <b>+</b> next to any pick, or any bet on a game card or the prop board.
-      Add two or more to price a parlay. Nothing is placed for you: this only does the maths.</div>`;
+      Add two or more to price a parlay. Already placed a bet? Use <b>Paste a slip</b> to fill this in from your sportsbook's text. Nothing is placed for you: this only does the maths.</div>`;
     return;
   }
   html += `<div class="items">${legs.map((l) => `<div class="item"><div class="sel">${esc(l.selection)}</div>
       <button class="x" data-act="toggle" data-key="${esc(l.key)}" aria-label="Remove ${esc(l.selection)}">×</button>
       <div class="meta">${esc(l.game)} · ${l.started ? `started · last price ${fmtOdds(l.odds)}` : l.assumed ? `no price in the feed (${fmtOdds(l.odds)} assumed)` : fmtOdds(l.odds)} · win chance ${l.started ? "before the game " : ""}${pct(l.p_cond, 0)}</div>
-      ${l.started && l.line != null ? `<label class="sline">Your line <input type="number" step="0.5" data-line-key="${esc(l.key)}" value="${esc(S.slipLines[l.key] ?? l.line)}" aria-label="The line you bet for ${esc(l.selection)}"></label>` : ""}</div>`).join("")}</div>`;
+      ${(l.started || S.slipLines[l.key] != null) && l.line != null ? `<label class="sline">Your line <input type="number" step="0.5" data-line-key="${esc(l.key)}" value="${esc(S.slipLines[l.key] ?? l.line)}" aria-label="The line you bet for ${esc(l.selection)}"></label>${!l.started && S.slipLines[l.key] != null && Math.abs(parseFloat(S.slipLines[l.key]) - l.line) > 1e-9 ? `<span class="sline-note">the tool has ${lineNum(l.line)}: the chance shown is for that line</span>` : ""}` : ""}</div>`).join("")}</div>`;
   const nAssumed = legs.filter((l) => l.assumed).length, nStarted = legs.filter((l) => l.started).length;
   const E = S.slipEval;
   if (E && E.n) {
@@ -1918,6 +1996,14 @@ function updateSlipCalc() {
   const b = dec - 1;
   const f = Math.max(0, Math.min(((b * pw - (1 - ph)) / b) * st.kelly_fraction, st.kelly_cap));
   const stake = parseFloat(S.slipStake);
+  // a bet on a game that has started, or at a line other than the tool's: the chance above is not for this bet
+  const legs = S.slip.map((k) => S.legs[k]).filter(Boolean);
+  const offLine = legs.some((l) => l.started || (S.slipLines[l.key] != null && l.line != null && Math.abs(parseFloat(S.slipLines[l.key]) - l.line) > 1e-9));
+  if (offLine) {
+    box.innerHTML = `${stake > 0 ? `<div class="kv"><span class="k">Pays if it wins</span><span class="v">${money(stake * dec, 2)}</span></div>` : ""}
+      <div class="hint">No verdict for this one: it has a game that has started or a line different from the tool's, so the chance shown above is not the chance of this exact bet. It can still be recorded and followed.</div>`;
+    return;
+  }
   let html = `<div class="kv"><span class="k">Expected return at these odds</span><span class="v ${cls(ev)}">${spct(ev)}${stake > 0 ? ` (${money(ev * stake, 2)})` : ""}</span></div>`;
   if (stake > 0) html += `<div class="kv"><span class="k">Pays if it wins</span><span class="v">${money(stake * dec, 2)}</span></div>`;
   if (f > 0) html += `<div class="hint verdict good">${ev < 0.02 ? "A small edge at these odds: worth it only if every line and price still matches your sportsbook." : "Worth a bet at these odds."} ${S.bankroll ? `Suggested stake for your $${S.bankroll.toLocaleString()} bankroll: <button data-act="use-stake" data-v="${(S.bankroll * f).toFixed(2)}">${money(S.bankroll * f, 2)}</button>` : `Suggested stake: ${pct(f)} of your bankroll (set your bankroll at the top to see dollars).`}</div>`;
@@ -1995,7 +2081,30 @@ document.addEventListener("click", async (e) => {
     renderMain(); return;
   }
   if (act === "toggle") { e.preventDefault(); await toggleLeg(a.dataset.key); return; }
-  if (act === "clear-slip") { S.slip = []; saveSlip(); S.slipEval = null; renderSlip(); $$('[data-act="toggle"].on').forEach((b) => { b.classList.remove("on"); if (b.classList.contains("add")) b.textContent = "+"; }); return; }
+  if (act === "import-toggle") { S.importOpen = !S.importOpen; renderSlip(); if (S.importOpen) { const t = $("#impText"); if (t) t.focus(); } return; }
+  if (act === "import-read") {
+    const text = ($("#impText") || {}).value || "";
+    if (!text.trim()) { toast("Paste the text of your bet slip first"); return; }
+    a.disabled = true;
+    try {
+      const res = await api("/api/slip/import", { method: "POST", body: JSON.stringify({ text }) });
+      const picks = res.picks.filter((x) => S.legs[x.key]);
+      if (picks.length) {
+        S.slip = picks.map((x) => x.key);
+        S.slipLines = {};
+        for (const x of picks) if (x.line != null) S.slipLines[x.key] = x.line;
+        S.keepOdds = res.odds;  // the odds on the slip, not the standard price
+        if (res.stake != null) S.slipStake = res.stake;
+        S.importOpen = false; S.importText = "";
+        saveSlip(); await evalSlip();
+      } else S.importText = text;
+      S.importNote = { n: picks.length, odds: res.odds, stake: res.stake, unmatched: res.unmatched };
+      if (window.innerWidth <= 1100) $("#slip").classList.add("open");
+      renderSlip(); renderMain();
+    } catch (err) { toast(String(err.message || err)); a.disabled = false; }
+    return;
+  }
+  if (act === "clear-slip") { S.slipLines = {}; S.importNote = null; S.slip = []; saveSlip(); S.slipEval = null; renderSlip(); $$('[data-act="toggle"].on').forEach((b) => { b.classList.remove("on"); if (b.classList.contains("add")) b.textContent = "+"; }); return; }
   if (act === "ptab") { S.parlayTab = a.dataset.tab; renderMain(); return; }
   if (act === "ltab") { S.likelyTab = a.dataset.tab; renderMain(); return; }
   if (act === "pb-tab") { S.pb.tab = a.dataset.tab; S.pb.limit = 40; renderMain(); return; }
@@ -2037,11 +2146,11 @@ document.addEventListener("click", async (e) => {
     if (isNaN(odds) || !(stake > 0)) { toast("Enter the odds and a stake first"); return; }
     try {
       const lines = {};
-      for (const k of S.slip) { const v = parseFloat(S.slipLines[k]), l = S.legs[k]; if (l && l.started && !isNaN(v) && l.line != null && Math.abs(v - l.line) > 1e-9) lines[k] = v; }
+      for (const k of S.slip) { const v = parseFloat(S.slipLines[k]), l = S.legs[k]; if (l && !isNaN(v) && l.line != null && Math.abs(v - l.line) > 1e-9) lines[k] = v; }
       await api("/api/bets", { method: "POST", body: JSON.stringify({ keys: S.slip, odds, stake, lines }) });
       toast("Recorded. Follow it on the Live page.");
       S.live = null; S.odds = null;
-      S.slip = []; saveSlip(); S.slipEval = null; S.slipStake = null; S.track = null; S.slipLines = {};
+      S.slip = []; saveSlip(); S.slipEval = null; S.slipStake = null; S.track = null; S.slipLines = {}; S.importNote = null;
       renderSlip(); renderMain();
     } catch (err) { toast(String(err.message || err)); }
     return;
@@ -2095,6 +2204,12 @@ document.addEventListener("click", async (e) => {
 document.addEventListener("input", (e) => {
   const t = e.target;
   if (t.id === "bankroll") { S.bankroll = parseFloat(t.value) || 0; localStorage.setItem("bankroll", S.bankroll); updateSlipCalc(); clearTimeout(window._br); window._br = setTimeout(() => { if (S.page === "slate") renderMain(); if (S.page === "live") for (const id of Object.keys(S.offers)) checkOffer(id, true); }, 400); return; }
+  if (t.dataset.hedge) {
+    S.hedgeOdds[t.dataset.hedge] = t.value;
+    const b = S.live && S.live.bets.find((x) => x.id === t.dataset.hedge), box = document.getElementById(`hedge-${t.dataset.hedge}`);
+    if (b && box) box.innerHTML = hedgeCalc(b);
+    return;
+  }
   if (t.classList.contains("offer")) {
     const id = t.dataset.bet;
     S.offers[id] = t.value; localStorage.setItem("offers", JSON.stringify(S.offers));
@@ -2102,7 +2217,8 @@ document.addEventListener("input", (e) => {
     return;
   }
   if (t.id === "slipOdds") { S.slipOdds = t.value; updateSlipCalc(); return; }
-  if (t.dataset.lineKey) { S.slipLines[t.dataset.lineKey] = t.value; return; }
+  if (t.dataset.lineKey) { S.slipLines[t.dataset.lineKey] = t.value; updateSlipCalc(); return; }
+  if (t.id === "impText") { S.importText = t.value; return; }
   if (t.id === "slipStake") { S.slipStake = t.value; updateSlipCalc(); return; }
   const bind = t.dataset.bind;
   if (!bind) return;

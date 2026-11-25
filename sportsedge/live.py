@@ -72,7 +72,8 @@ def scoreboard(sport: str, day: dt.date) -> list[dict]:
                         "away": sources.norm_team(sport, t["away"]["team"]["abbreviation"]),
                         "home_score": num(t["home"].get("score")), "away_score": num(t["away"].get("score")),
                         "state": typ.get("state") or "pre", "detail": typ.get("shortDetail") or typ.get("detail") or "",
-                        "period": int(st.get("period") or 0), "clock": float(st.get("clock") or 0.0)})
+                        "period": int(st.get("period") or 0), "clock": float(st.get("clock") or 0.0),
+                        "home_tid": t["home"]["team"].get("id"), "away_tid": t["away"]["team"].get("id")})
         return out
 
     return _fresh(("sb", sport, day), fetch)
@@ -263,9 +264,10 @@ def _logit(p: float) -> float:
 
 
 def game_leg_chance(sport: str, leg: dict, g: dict, home_wp: float | None, sd: dict | None = None,
-                    home_wp0: float | None = None) -> tuple[float, float]:
+                    home_wp0: float | None = None, at: float | None = None) -> tuple[float, float]:
     """(chance the leg wins, chance it pushes) for a moneyline, spread or total, from the score and clock.
-    home_wp / home_wp0: ESPN's live win chance for the home team now and at the start of the game."""
+    home_wp / home_wp0: ESPN's live win chance for the home team now and at the start of the game.
+    at: judge the pick at this line instead of its own (a live line), from the same pre-game expectation."""
     mk, side = leg["market_key"], leg["side"]
     f = remaining_fraction(sport, g)
     margin, total = g["home_score"] - g["away_score"], g["home_score"] + g["away_score"]
@@ -289,6 +291,8 @@ def game_leg_chance(sport: str, leg: dict, g: dict, home_wp: float | None, sd: d
     # what y was expected to end on before the game, read back from the pick's pre-game chance;
     # the part of the game still to play is expected to add its share of that
     mean = y + _anchor_mean(p_pre, thr, s0, tie_is_half=(mk == "ml")) * f
+    if at is not None and mk != "ml":
+        thr = sign * float(at) if mk == "total" else -float(at)
     if f <= 0:
         return (1.0 if y > thr else 0.0), (1.0 if abs(y - thr) < 1e-9 else 0.0)
     p_win, p_push = _over(mean, s0 * math.sqrt(f), thr)
@@ -321,7 +325,7 @@ def _poisson_rate_for(p_cond: float, line: float) -> float:
     return _solve(cond, p_cond, 1e-6, max(4.0 * need + 20.0, 20.0))
 
 
-def prop_leg_chance(leg: dict, value: float, f: float) -> tuple[float, float]:
+def prop_leg_chance(leg: dict, value: float, f: float, at: float | None = None) -> tuple[float, float]:
     """(chance the leg wins, chance it pushes) for a player prop, from his stat line and the time left.
 
     The pick's pre-game chance fixes what the player was expected to do over the whole game, so with nothing
@@ -344,6 +348,9 @@ def prop_leg_chance(leg: dict, value: float, f: float) -> tuple[float, float]:
         whole = abs(line - round(line)) < 1e-9
         # the full-game expectation that the pick's pre-game chance implies
         mu = _poisson_rate_for(p_over_pre, line) if small else _anchor_mean(p_over_pre, line, spread0)
+        if at is not None:  # judged at a live line: the expectation above still comes from the pre-game one
+            line = float(at)
+            whole = abs(line - round(line)) < 1e-9
         pace = value / max(1.0 - f, 0.15) if f < 0.9 else mu
         rest = max(f * ((1 - PACE_WEIGHT) * mu + PACE_WEIGHT * pace), 0.0)  # expected production from here
         if small:
@@ -355,6 +362,179 @@ def prop_leg_chance(leg: dict, value: float, f: float) -> tuple[float, float]:
             if not yards and value > line:
                 over, push = 1.0, 0.0
     return (over, push) if side == "over" else (max(0.0, 1.0 - over - push), push)
+
+
+# ============================================================================= live prices and hedges
+# The tool does not suggest new live bets. Its live estimate knows the score, the clock and the box score, and
+# nothing else: on the first night it was set against real in-game prices it "found value" in a third of them,
+# with gaps of 30 points and more. A gap that size is the estimate being wrong (a big lead shrinks, starters
+# sit), not the sportsbook. So live prices are shown as they are, every pairing of live price and estimate is
+# logged for testing against results, and the one live bet that is pure arithmetic is offered: a hedge.
+LOG_COLS = ["ts", "sport", "event_id", "key", "selection", "line", "odds", "other_odds", "p_tool", "q_book", "left", "now"]
+
+
+def _log_path():
+    from .tracker import history_dir
+
+    return history_dir() / "live_log.csv"
+
+
+def _log_rows(rows: list[dict]):
+    """Keep the first sighting of each (pick, live line): enough to test the estimate later without filling
+    the disk with every tick."""
+    if not rows:
+        return
+    path = _log_path()
+    seen = _cache.setdefault("live_logged", None)
+    if seen is None:
+        seen = set()
+        if path.exists():
+            try:
+                old = pd.read_csv(path, usecols=["key", "line"])
+                seen = set(zip(old["key"].astype(str), old["line"].astype(str)))
+            except (ValueError, OSError):
+                seen = set()
+        _cache["live_logged"] = seen
+    fresh = [r for r in rows if (str(r["key"]), str(r["line"])) not in seen]
+    if not fresh:
+        return
+    ts = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    df = pd.DataFrame([{"ts": ts, "sport": r["sport"], "event_id": r["event_id"], "key": r["key"], "selection": r["selection"],
+                        "line": r["line"], "odds": r["odds"], "other_odds": r["other_odds"], "p_tool": round(r["p"], 4),
+                        "q_book": round(r["q"], 4), "left": round(r["left"], 3), "now": r["now"]} for r in fresh], columns=LOG_COLS)
+    df.to_csv(path, mode="a", header=not path.exists(), index=False)
+    seen.update((str(r["key"]), str(r["line"])) for r in fresh)
+
+
+def board(pre_legs: list[dict], sd_by_sport: dict | None = None, day: dt.date | None = None, log: bool = True) -> dict:
+    """The sportsbook's in-game prices for every game in play.
+
+    pre_legs: each game's picks at their last pre-game number, which is where a live price is matched to a
+    pick and where the logged estimate starts from. Returns {'games': [...], 'rows': {pick key: live row}}:
+    a row is the pick at its live line with the live price on it and on the other side."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from .oddsmath import devig, implied
+    from .tracker import with_line
+
+    by_game: dict = {}
+    for l in pre_legs:
+        by_game.setdefault((str(l["sport"]).lower(), l["home"], l["away"]), []).append(l)
+    playing = [(sport, g) for sport in ("nfl", "nba") for g in scoreboard(sport, day or dt.date.today()) if g["state"] == "in"]
+
+    def prices(x):
+        sport, g = x
+        return _fresh(("liveodds", sport, g["event_id"]), lambda: sources.espn_live_odds(sport, g["event_id"], g.get("home_tid"), g.get("away_tid")))
+
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        live_odds = list(ex.map(prices, playing)) if playing else []
+    games, rows, logged = [], {}, []
+    for (sport, g), lo in zip(playing, live_odds):
+        pre = by_game.get((sport, g["home"], g["away"])) or []
+        f = remaining_fraction(sport, g)
+        info = {"sport": sport, "event_id": g["event_id"], "game": f"{g['away']} @ {g['home']}", "home": g["home"], "away": g["away"],
+                "book": (lo or {}).get("book"), "line": (lo or {}).get("line"), "lines": [], "n_props": 0}
+        games.append(info)
+        if not lo or not pre:
+            continue
+        box = boxscore(sport, g["event_id"])
+        sd = (sd_by_sport or {}).get(sport)
+
+        def row(leg, line, odds, other, p, push, now):
+            if odds is None or other is None or pd.isna(odds) or pd.isna(other):
+                return None
+            at = leg if line is None else with_line(leg, line)
+            return {"key": leg["key"], "sport": sport, "event_id": g["event_id"], "game": info["game"], "selection": at["selection"],
+                    "market_key": leg["market_key"], "side": leg["side"], "player": leg.get("subject") if leg.get("player_key") else None,
+                    "line": line, "pre_line": leg.get("line"), "odds": float(odds), "other_odds": float(other),
+                    "dec": american_to_decimal(odds), "q": float(devig([implied(odds), implied(other)])[0]),
+                    "p": p / max(1.0 - push, 1e-9), "left": f, "now": now, "book": lo["book"]}
+
+        find = lambda mk, side, who="": next((l for l in pre if l["market_key"] == mk and l["side"] == side  # noqa: E731
+                                              and (l.get("player_key") or "") == who), None)
+        L = lo["line"]
+        sp = L.get("spread_home")
+        for mk, side, line, odds, other in (
+                ("ml", "home", None, L.get("ml_home"), L.get("ml_away")), ("ml", "away", None, L.get("ml_away"), L.get("ml_home")),
+                ("spread", "home", sp, L.get("spread_home_odds"), L.get("spread_away_odds")),
+                ("spread", "away", None if sp is None else -sp, L.get("spread_away_odds"), L.get("spread_home_odds")),
+                ("total", "over", L.get("total"), L.get("over_odds"), L.get("under_odds")),
+                ("total", "under", L.get("total"), L.get("under_odds"), L.get("over_odds"))):
+            leg = find(mk, side)
+            if leg is None or (mk != "ml" and line is None):
+                continue
+            p, push = game_leg_chance(sport, leg, g, box.get("home_wp"), sd, box.get("home_wp0"), at=line)
+            r = row(leg, line, odds, other, p, push, f"{g['away']} {g['away_score']:g}, {g['home']} {g['home_score']:g}")
+            if r:
+                info["lines"].append({k: r[k] for k in ("selection", "market_key", "side", "line", "pre_line", "odds", "q")})
+                rows[r["key"]] = r
+                logged.append(r)
+        for pl in lo["props"]:
+            over, under = find(pl["market"], "over", pl["key"]), find(pl["market"], "under", pl["key"])
+            stat = box["players"].get(pl["key"])
+            if over is None or under is None or stat is None or pl.get("line") is None:
+                continue  # no pre-game number to match it to, or he has not played
+            value = float(stat.get(pl["market"], 0.0))
+            p_over, push = prop_leg_chance(over, value, f, at=float(pl["line"]))
+            info["n_props"] += 1
+            for leg, p, odds, other in ((over, p_over, pl.get("over_odds"), pl.get("under_odds")),
+                                        (under, max(0.0, 1.0 - p_over - push), pl.get("under_odds"), pl.get("over_odds"))):
+                r = row(leg, float(pl["line"]), odds, other, p, push, f"{value:g}")
+                if r:
+                    rows[r["key"]] = r
+                    logged.append(r)
+    if log:
+        try:
+            _log_rows(logged)
+        except OSError:
+            pass
+    return {"games": games, "rows": rows}
+
+
+def _flip(key: str) -> str | None:
+    """The key of the other side of the same bet."""
+    parts = key.split("|")
+    other = {"home": "away", "away": "home", "over": "under", "under": "over"}.get(parts[3] if len(parts) > 3 else "")
+    return None if other is None else "|".join(parts[:3] + [other] + parts[4:])
+
+
+def hedge(bet: dict, rows: dict) -> dict | None:
+    """For a bet with exactly one pick left and that game in play: the stake on the other side, at the
+    sportsbook's live price, that returns the same whichever way it goes. Pure arithmetic on real prices.
+
+    When the live line is not the line the bet was made at, the two bets can both win (a middle: the result
+    lands between the two lines) or both lose (a gap). Both are reported, with what each pays."""
+    if bet.get("status") in ("won", "lost", "push") or bet.get("open") != 1:
+        return None
+    leg = next((v for v in bet["legs"] if not v["decided"]), None)
+    if leg is None or leg.get("state") != "in":
+        return None
+    other = rows.get(_flip(str(leg.get("key"))) or "")
+    if other is None:
+        return None
+    payout, stake = float(bet["payout"]), float(bet["stake"])
+    h = payout / other["dec"]              # the hedge returns exactly what the bet would have
+    out = {"selection": other["selection"], "odds": other["odds"], "book": other["book"], "stake": h,
+           "locked": payout - stake - h,   # one of the two wins: the same either way
+           "line": other["line"], "bet_line": leg.get("line"), "middle": None, "gap": None}
+    mk, side = leg["market_key"], leg["side"]
+    if mk != "ml" and leg.get("line") is not None and other["line"] is not None:
+        # put both on one number X: the home margin for a spread, otherwise the total or the stat itself
+        if mk == "spread":
+            mine = -float(leg["line"]) if side == "home" else float(leg["line"])      # home wins above, away below
+            theirs = float(other["line"]) if side == "home" else -float(other["line"])
+            above = side == "home"
+        else:
+            mine, theirs, above = float(leg["line"]), float(other["line"]), side == "over"
+        lo, hi = min(mine, theirs), max(mine, theirs)
+        if hi - lo > 1e-9:
+            both_win = (theirs > mine) if above else (theirs < mine)
+            span = {"lo": lo, "hi": hi, "unit": "margin" if mk == "spread" else "result"}
+            if both_win:
+                out["middle"] = {**span, "profit": 2 * payout - stake - h}
+            else:
+                out["gap"] = {**span, "loss": stake + h}
+    return out
 
 
 # ============================================================================= one leg, one bet

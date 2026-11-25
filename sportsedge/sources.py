@@ -466,6 +466,55 @@ def espn_props(sport: str, games: pd.DataFrame, ttl: float | None = 0.25) -> pd.
     return pd.DataFrame(rows, columns=PROP_COLS)
 
 
+def espn_live_odds(sport: str, event_id: str, home_tid=None, away_tid=None) -> dict | None:
+    """The sportsbook's in-game prices for one game in play: the live spread, total and moneylines, and the
+    live over/under prop lines. ESPN lists them under a separate provider ("DraftKings - Live Odds").
+    Returns None when no live prices are posted. Never cached on disk: they change with every play."""
+    core = f"https://sports.core.api.espn.com/v2/sports/{ESPN_CORE[sport]}/events/{event_id}/competitions/{event_id}"
+    try:
+        items = _get(f"{core}/odds", {"limit": 50}, tries=2).get("items", [])
+    except RuntimeError:
+        return None
+    it = next((o for o in items if "live" in ((o.get("provider") or {}).get("name") or "").lower()), None)
+    if it is None:
+        return None
+    prov = it.get("provider") or {}
+    h, a = it.get("homeTeamOdds") or {}, it.get("awayTeamOdds") or {}
+    cur = it.get("current") or {}
+    am = lambda d, k: _american(((d.get("current") or {}).get(k) or {}).get("american"))  # noqa: E731
+    line = {"spread_home": _line(((h.get("current") or {}).get("pointSpread") or {}).get("american")),
+            "spread_home_odds": am(h, "spread"), "spread_away_odds": am(a, "spread"),
+            "total": _line((cur.get("total") or {}).get("american")) if cur.get("total") else it.get("overUnder"),
+            "over_odds": _american((cur.get("over") or {}).get("american")) if cur.get("over") else it.get("overOdds"),
+            "under_odds": _american((cur.get("under") or {}).get("american")) if cur.get("under") else it.get("underOdds"),
+            "ml_home": am(h, "moneyLine") if (h.get("current") or {}).get("moneyLine") else h.get("moneyLine"),
+            "ml_away": am(a, "moneyLine") if (a.get("current") or {}).get("moneyLine") else a.get("moneyLine")}
+    line = {k: (None if v is None or pd.isna(v) else float(v)) for k, v in line.items()}
+    props = []
+    if (it.get("propBets") or {}).get("$ref"):
+        try:
+            got, page = [], 1
+            while True:
+                j = _get(f"{core}/odds/{prov.get('id')}/propBets", {"limit": 1000, "page": page}, tries=2)
+                got += j.get("items", [])
+                if page >= int(j.get("pageCount") or 1) or page >= 5:
+                    break
+                page += 1
+            got = [i for i in got if (i.get("type") or {}).get("name") in ESPN_PROP_TYPES[sport]]
+            names = {}
+            for tid in (home_tid, away_tid):
+                if tid is not None and not pd.isna(tid):
+                    names.update(_espn_roster(sport, tid))
+            for aid in sorted({x for x in map(_athlete_id, got) if x and x not in names})[:25]:
+                nm = _espn_athlete(sport, aid)
+                if nm:
+                    names[aid] = nm
+            props = parse_espn_props(sport, got, names)
+        except RuntimeError:
+            props = []
+    return {"book": prov.get("name") or "live", "line": line, "props": props}
+
+
 def espn_props_history(sport: str, days: list[dt.date]) -> pd.DataFrame:
     """Closing prop lines for finished games on the given days (kept in the cache for good)."""
     (config.CACHE_DIR / "espn_props").mkdir(parents=True, exist_ok=True)

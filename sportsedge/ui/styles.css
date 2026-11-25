@@ -439,6 +439,22 @@ table.board .side-btn { width: auto; }
 .slip .item .sline { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; margin-top: 4px; font-size: 12px; color: var(--ink-2); font-weight: 600; }
 .slip .item .sline input { width: 86px; padding: 4px 8px; }
 .sc-rec { justify-self: start; font-size: 12.5px; font-weight: 700; }
+.sc-live-px { display: flex; flex-wrap: wrap; gap: 3px 12px; align-items: baseline; font-size: 12.5px; font-variant-numeric: tabular-nums; padding-top: 6px; border-top: 1px solid var(--grid); }
+.sc-live-px .mini-lab { flex-basis: 100%; }
+.cash.hedge { margin-top: 10px; }
+/* pasting a slip from the sportsbook */
+.slip .hd .btn[data-act="import-toggle"] { margin-left: auto; }
+.slip .hd .btn[data-act="import-toggle"] + .btn { margin-left: 0; }
+.imp { padding: 10px 14px 12px; border-bottom: 1px solid var(--grid); display: grid; gap: 8px; }
+.imp label { font-size: 12.5px; font-weight: 700; }
+.imp textarea { min-height: 120px; font-family: inherit; font-size: 13px; }
+.imp .row { display: flex; gap: 8px; }
+.imp .hint { font-size: 12px; color: var(--ink-2); }
+.imp-note { margin: 10px 12px 0; padding: 9px 12px; border-radius: 12px; background: var(--pos-wash); color: var(--ink); font-size: 12.5px; }
+.imp-note.warn { background: var(--warn-bg); color: var(--warn-ink); }
+.imp-note ul { margin: 2px 0 0; padding-left: 18px; }
+.imp-note .muted { color: inherit; opacity: .8; }
+.slip .item .sline-note { grid-column: 1 / -1; font-size: 11.5px; color: var(--muted); }
 .st-score { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: 0 0 10px; font-size: 13px; color: var(--ink-2); }
 .st-score b { font-size: 17px; color: var(--ink); font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
 .st-score .sc-live { margin: 0; }

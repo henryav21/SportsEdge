@@ -25,7 +25,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import access, betmoves, config, engine, live, markets, oddslog, parlay, plays, sources, tracker
+from . import access, betmoves, config, engine, live, markets, oddslog, parlay, plays, slipread, sources, tracker
 from .util import norm_name
 
 UI_DIR = Path(__file__).resolve().parent / "ui"
@@ -358,6 +358,10 @@ def _odds_loop():
             if STATE["status"] == "running":
                 continue
             check_odds()
+            try:
+                _live_board()  # logs each new live price beside the tool's estimate, for testing against results
+            except Exception as e:
+                _log(f"Live price log skipped: {e!r}")
             last = dt.datetime.fromisoformat(STATE["run_at"]) if STATE["run_at"] else None
             old_enough = last is None or (dt.datetime.now() - last).total_seconds() >= config.AUTO_UPDATE_MINUTES * 60
             if _stale_games() and old_enough:
@@ -387,6 +391,10 @@ class RunReq(BaseModel):
 
 class SlipReq(BaseModel):
     keys: list[str]
+
+
+class ImportReq(BaseModel):
+    text: str
 
 
 class PropLine(BaseModel):
@@ -516,6 +524,14 @@ def api_slate():
     return out
 
 
+@app.post("/api/slip/import")
+def api_slip_import(req: ImportReq):
+    """Read a bet slip pasted as text: which of the tool's picks it holds, its odds and its stake. Nothing is
+    recorded here: the page fills the bet slip with what was found, for checking before it is recorded."""
+    pool = {**_started(), **STATE["legs"]}  # games still to come, and games that have started
+    return clean(slipread.read(req.text[:20000], list(pool.values())))
+
+
 @app.post("/api/slip")
 def api_slip(req: SlipReq):
     legs = _picks(req.keys)
@@ -625,6 +641,32 @@ def api_live():
     return clean({"bets": bets, "scores": scores, "updated": dt.datetime.now().isoformat(timespec="seconds"),
                   "in_play": any(b.get("in_play") for b in bets) or any(g["state"] == "in" for g in scores),
                   "kelly_fraction": config.KELLY_FRACTION})
+
+
+def _live_board(log: bool = True) -> dict:
+    """Live prices for games in play, matched to the picks of those games at their last pre-game number."""
+    sd, _ = _live_context()
+    _started()  # refresh the picks of games that have started
+    pre = {**_STARTED["legs"], **{k: l for k, l in STATE["legs"].items() if not l.get("assumed")}}
+    return live.board(list(pre.values()), sd, log=log)
+
+
+@app.get("/api/live/board")
+def api_live_board():
+    """The sportsbook's live prices for games in play, and for each open bet with one pick left, the hedge
+    that locks in the same return either way."""
+    try:
+        b = _live_board()
+        sd, legs = _live_context()
+        hedges = {}
+        for bet in live.open_bets(tracker.load_bets(), sd, legs):
+            h = live.hedge(bet, b["rows"]) if not bet.get("error") else None
+            if h:
+                hedges[str(bet["id"])] = h
+        return clean({"games": b["games"], "hedges": hedges, "checked_at": dt.datetime.now().isoformat(timespec="seconds")})
+    except Exception as e:  # an extra: the Live page must still load without it
+        _log(f"Live prices skipped: {e!r}")
+        return {"games": [], "hedges": {}, "error": repr(e)}
 
 
 @app.post("/api/live/cashout")
