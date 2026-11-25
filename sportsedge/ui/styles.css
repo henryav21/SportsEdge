@@ -105,6 +105,12 @@ nav.tabs .short { display: none; }
 @media (max-width: 1560px) { .bankroll .full { display: none; } }
 .bankroll input { width: 104px; }
 .help-btn { font-weight: 700; }
+.pxseg button { font-variant-numeric: tabular-nums; }
+header.top .pxseg button { padding: 5px 10px; font-size: 12.5px; }
+.prefs { padding: 14px 16px; margin-bottom: 14px; border-radius: 14px; background: var(--surface-2); }
+.prefs .pxseg { display: inline-flex; flex-wrap: wrap; }
+.prefs .pxseg .muted { font-weight: 500; margin-left: 4px; }
+.prefs .form-row label { flex: 1 1 200px; }
 
 /* ------------------------------------------------------------------ controls */
 .btn {
@@ -617,9 +623,20 @@ details > summary.muted:hover { color: var(--ink); }
   .jump { margin-left: 0; width: 100%; }
 }
 
+/* laptops: the page tabs go on their own row under the brand and the controls, so nothing is pushed off the edge.
+   The header is then two rows tall, so whatever sticks or scrolls to just below it moves down by a row. */
+@media (max-width: 1560px) {
+  header.top { flex-wrap: wrap; gap: 6px 12px; padding: 9px 20px; }
+  nav.tabs { order: 3; width: 100%; }
+  aside.slip { top: 116px; max-height: calc(100vh - 136px); }
+  .card, .sec-title, .game { scroll-margin-top: 118px; }
+}
+
 /* tablets: the header wraps, with the page tabs on their own full-width row */
 @media (max-width: 980px) {
   header.top { flex-wrap: wrap; gap: 8px 10px; padding: 9px 14px; }
+  /* keep the brand and the controls on one row: the status keeps its dot and loses its words */
+  .help-btn .xl, .status > span:last-child { display: none; }
   nav.tabs { order: 3; width: 100%; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 3px; }
   nav.tabs button { padding: 7px 2px; justify-content: center; overflow: hidden; }
   .hstats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -660,7 +677,7 @@ details > summary.muted:hover { color: var(--ink); }
 @media (max-width: 640px) {
   /* no blur on the header here: a blurred header would pin the bottom tab bar to itself instead of the screen */
   header.top { padding: 8px 12px; gap: 8px; flex-wrap: nowrap; backdrop-filter: none; background: var(--surface); }
-  .brand-name, .help-btn .full, .status > span:last-child { display: none; }
+  .brand-name, .help-btn .full, .status > span:last-child, header.top .pxseg { display: none; }
   .top-right { gap: 7px; }
   .bankroll input { width: 100px; }
   .bankroll > span { display: none; }

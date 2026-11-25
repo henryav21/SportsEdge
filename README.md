@@ -89,6 +89,29 @@ so far, and every pick at the last line and price logged before the start. Tap t
 odds from your sportsbook's slip, change a line in the slip if yours was different, and record it. The Live
 page then follows the bet like any other.
 
+## Trading apps (prices in cents)
+
+A trading app sells a contract that pays $1 if you are right, for a price in cents, and charges a fee on
+top. The **−110 / 52¢** switch at the top (or **Guide and settings** on a phone) changes the whole tool to
+that way of writing prices.
+
+- **Shown:** every price appears in cents (−110 becomes 52¢, +150 becomes 40¢). Fair odds become a fair
+  price. Each pick also shows **worth up to**: the most it is worth paying on your app once the fee is
+  counted, which is the tool's win chance less the fee.
+- **Typed:** the bet slip, the hedge box, the form for pricing a prop line and the form for correcting a
+  game's line all take a price in cents. The fee is added before anything is worked out, so a return is
+  what you would really get. The slip also shows what one contract costs with the fee and how many a
+  given spend buys.
+- **The fee** is set under Guide and settings as a flat amount per contract in cents, plus a percentage
+  of price × (1 − price). Both start at zero: set them from your app's fee page, or every return will
+  look better than it is.
+- **What does not change.** The tool's own lines and prices still come from a sportsbook's feed, shown in
+  cents for comparison. A trading app's line and price can differ, so type yours in. The settings are kept
+  in the browser, so each device has its own. Inside the tool everything is still American odds: cents
+  are converted where a price is shown and where one is typed.
+- **Selling early** is the same question as a cash-out: type what you would get for selling into the
+  cash-out box on the Live page.
+
 ## Pasting a bet slip
 
 **Paste a slip**, at the top of the bet slip, reads a bet copied as text from your sportsbook (the slip or

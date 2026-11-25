@@ -24,7 +24,11 @@
       <div id="status" class="status" role="status" aria-live="polite"></div>
       <button class="btn" data-act="refresh" id="refreshBtn" title="Download the latest odds, injuries and weather, then re-run everything">Refresh</button>
       <label class="bankroll" title="Your betting budget. Stake suggestions are shown in dollars once this is set."><span><span class="full">Bankroll </span>$</span><input id="bankroll" type="number" min="0" step="10" placeholder="Bankroll $" aria-label="Bankroll in dollars"></label>
-      <button class="btn help-btn" data-act="guide" aria-label="Open the guide: what the numbers mean">?<span class="full"> Guide</span></button>
+      <div class="seg pxseg" role="group" aria-label="How prices are shown">
+        <button data-act="px-mode" data-mode="odds" title="American odds, the way a sportsbook shows prices">−110</button>
+        <button data-act="px-mode" data-mode="cents" title="Cents per contract, the way a trading app shows prices. Set the fee under Guide and settings.">52¢</button>
+      </div>
+      <button class="btn help-btn" data-act="guide" aria-label="Open the guide and settings">?<span class="full"> Guide<span class="xl"> and settings</span></span></button>
     </div>
   </header>
   <div class="layout">

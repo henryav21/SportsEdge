@@ -53,7 +53,40 @@ async function api(path, opts = {}) {
   }
   return r.json();
 }
-const fmtOdds = (a) => (a == null || isNaN(a) ? "–" : a > 0 ? `+${Math.round(a)}` : `${Math.round(a)}`);
+// How prices are written. A sportsbook quotes American odds (-110, +150). A trading app sells a contract that pays
+// $1 for a price in cents (52¢), and charges a fee on top. Everything inside the tool stays in American odds:
+// prices are turned into cents only where they are shown, and back where they are typed.
+const PX = { mode: localStorage.getItem("px_mode") === "cents" ? "cents" : "odds",
+  flat: parseFloat(localStorage.getItem("px_flat") || "0") || 0,     // fee per contract, in cents
+  rate: parseFloat(localStorage.getItem("px_rate") || "0") || 0 };   // plus this % of price x (1 - price)
+const inCents = () => PX.mode === "cents";
+const centsOf = (a) => 100 / (a > 0 ? 1 + a / 100 : 1 + 100 / Math.abs(a));          // American odds -> cents
+const americanOf = (c) => (c >= 50 ? (-100 * c) / (100 - c) : (100 * (100 - c)) / c);  // cents -> American odds
+const feeOf = (c) => (inCents() ? PX.flat + (PX.rate / 100) * c * (100 - c) / 100 : 0);  // the fee on one contract bought at c cents
+const fmtCents = (c) => (c == null || isNaN(c) ? "–" : `${c >= 10 && c <= 90 ? Math.round(c) : (Math.round(c * 10) / 10)}¢`);
+const fmtOdds = (a) => (a == null || isNaN(a) ? "–" : inCents() ? fmtCents(centsOf(a)) : a > 0 ? `+${Math.round(a)}` : `${Math.round(a)}`);
+/* What is in a price box as American odds, without adding a fee: for carrying a typed price across a switch. */
+const typedOddsRaw = (v) => { const x = parseFloat(v); return isNaN(x) ? NaN : inCents() ? (x > 0 && x < 100 ? americanOf(x) : NaN) : x; };
+/* A price as it goes in a box: American odds, or cents to one decimal. */
+const boxPrice = (a) => (a == null || a === "" || isNaN(a) ? "" : inCents() ? String(Math.round(centsOf(a) * 10) / 10) : String(Math.round(a)));
+/* What was typed where a price goes -> American odds. In cents the fee is added first, so what comes out is
+   what the contract really costs. NaN when it is not a usable price. */
+function typedOdds(v) {
+  const x = parseFloat(v);
+  if (isNaN(x)) return NaN;
+  if (!inCents()) return x > -100 && x < 100 ? NaN : x;
+  if (x <= 0 || x >= 100) return NaN;
+  return americanOf(Math.min(x + feeOf(x), 99.9));
+}
+/* The most a contract is worth paying for a pick with this chance of winning, once the fee is counted. */
+function worthUpTo(p) {
+  let c = 100 * p;
+  for (let i = 0; i < 6; i++) c = 100 * p - feeOf(c);
+  return Math.max(c, 0);
+}
+const priceWord = () => (inCents() ? "Price" : "Odds");
+const feeText = () => (PX.flat || PX.rate ? `${PX.flat ? `${PX.flat}¢` : ""}${PX.flat && PX.rate ? " + " : ""}${PX.rate ? `${PX.rate}% of price × (1 − price)` : ""} a contract` : "no fee set");
+function syncPx() { for (const b of $$(".pxseg button")) b.classList.toggle("on", b.dataset.mode === PX.mode); }
 const pct = (p, d = 1) => (p == null || isNaN(p) ? "–" : `${(p * 100).toFixed(d)}%`);
 // signed numbers: a value that rounds to zero is shown unsigned ("0.0", not "+0.0" / "−0.0")
 function signed(x, d = 1) {
@@ -201,7 +234,8 @@ async function evalSlip() {
   try {
     S.slipEval = await api("/api/slip", { method: "POST", body: JSON.stringify({ keys: S.slip }) });
   } catch (_) { S.slipEval = null; }
-  S.slipOdds = S.keepOdds != null ? S.keepOdds : S.slipEval && S.slipEval.odds != null ? S.slipEval.odds : null;
+  const start = S.keepOdds != null ? S.keepOdds : S.slipEval && S.slipEval.odds != null ? S.slipEval.odds : null;
+  S.slipOdds = start == null ? null : boxPrice(start);
   S.keepOdds = null;
 }
 
@@ -340,11 +374,11 @@ function pickCard(l) {
       <button class="add ${on ? "on" : ""}" data-act="toggle" data-key="${esc(l.key)}" aria-label="${on ? "Remove" : "Add"} ${esc(l.selection)} ${on ? "from" : "to"} the bet slip" title="Add to bet slip">${on ? "✓" : "+"}</button></div>
     <div class="pc-body">${ring(l.p_cond, k)}
       <div class="pc-stats">
-        <div title="American odds. −150: bet $150 to win $100. +130: bet $100 to win $130."><span>Odds</span><b>${fmtOdds(l.odds)}</b></div>
+        <div title="${inCents() ? "The sportsbook's price for this pick, written as cents per contract. Your trading app sets its own price." : "American odds. −150: bet $150 to win $100. +130: bet $100 to win $130."}"><span>${inCents() ? "Sportsbook price" : "Odds"}</span><b>${fmtOdds(l.odds)}</b></div>
         <div title="What the sportsbook's odds imply once its fee is removed"><span>Book says</span><b>${pct(l.p_fair, 0)}</b></div>
         <div title="Average profit per $1 bet over many bets. +5% means 5 cents per dollar."><span>Return</span><b class="${cls(l.ev)}">${spct(l.ev)}</b></div>
       </div></div>
-    <div class="pc-foot">${chip(k)}${l.edge != null ? `<span title="Win chance minus the book's chance">edge ${signed(l.edge * 100)} pts</span>` : ""}${l.ev > 0 ? `<span title="Suggested stake: quarter-Kelly, never more than 3% of bankroll">stake ${stake}</span>` : ""}</div></article>`;
+    <div class="pc-foot">${chip(k)}${inCents() ? `<span title="The most a contract is worth paying on your app, after the fee: the tool's win chance, less the fee">worth up to <b>${fmtCents(worthUpTo(l.p_cond))}</b></span>` : ""}${l.edge != null ? `<span title="Win chance minus the book's chance">edge ${signed(l.edge * 100)} pts</span>` : ""}${l.ev > 0 ? `<span title="Suggested stake: quarter-Kelly, never more than 3% of bankroll">stake ${stake}</span>` : ""}</div></article>`;
 }
 const pickCards = (legs, empty) => (legs.length ? `<div class="pcards">${legs.map(pickCard).join("")}</div>` : `<div class="empty">${empty}</div>`);
 
@@ -444,8 +478,9 @@ function topPick(l) {
   const on = inSlip(l.key);
   const price = l.assumed ? `<span class="muted" title="The feed has no price for this prop. ${assumedOdds()} is a typical price, used until you type the real one from your slip.">no price in the feed</span>`
     : `<span>${fmtOdds(l.odds)}</span><span class="muted">return <span class="${cls(l.ev)}">${spct(l.ev)}</span></span>`;
+  const worth = inCents() ? `<span class="muted" title="The most a contract is worth paying on your app, after the fee">worth up to <b>${fmtCents(worthUpTo(l.p_cond))}</b></span>` : "";
   return `<li class="tp-row"><button class="add ${on ? "on" : ""}" data-act="toggle" data-key="${esc(l.key)}" aria-label="${on ? "Remove" : "Add"} ${esc(l.selection)} ${on ? "from" : "to"} the bet slip" title="Add to bet slip">${on ? "✓" : "+"}</button>
-    <div class="tp-main"><div class="pick">${esc(l.selection)}</div><div class="tp-sub">${l.assumed ? leanChip(l) : chip(ratingOf(l))}${price}</div></div>
+    <div class="tp-main"><div class="pick">${esc(l.selection)}</div><div class="tp-sub">${l.assumed ? leanChip(l) : chip(ratingOf(l))}${price}${worth}</div></div>
     <div class="tp-chance" title="The tool's chance this pick wins">${pct(l.p_cond, 0)}<small>to win</small></div></li>`;
 }
 /* A suggested parlay. The payout is exact only when every pick has a real price and no two share a game. */
@@ -461,10 +496,10 @@ function playCard(p) {
       <ul class="play-legs">${legs.map((l) => `<li><span class="pick">${esc(l.selection)}</span><span class="muted">${p.games.length > 1 ? `${esc(l.game)} · ` : ""}${pct(l.p_cond, 0)}</span></li>`).join("")}</ul>
       <div class="pl-nums ${p.est ? "two" : ""}">
         <div title="The tool's chance that every pick wins. Picks from the same game keep the way they move together."><span>Chance to hit</span><b>${pct(p.p_hit, p.p_hit < 0.1 ? 1 : 0)}</b></div>
-        <div title="Break-even odds. Only bet if your sportsbook pays more than this."><span>Fair odds (break-even)</span><b>${fmtOdds(p.fair_odds)}</b></div>
+        <div title="${inCents() ? "The break-even price. Only buy for less than this." : "Break-even odds. Only bet if your sportsbook pays more than this."}"><span>Fair ${inCents() ? "price" : "odds"} (break-even)</span><b>${fmtOdds(p.fair_odds)}</b></div>
         ${p.est ? "" : `<div title="Average profit per $1 bet over many bets"><span>Expected return</span><b class="${cls(p.ev)}">${spct(p.ev)}</b></div>`}
       </div>
-      ${p.est ? `<p class="play-note">The payout is an estimate: ${why}. Build it at your sportsbook and bet it only if the slip pays more than <b>${fmtOdds(p.fair_odds)}</b>.</p>` : ""}
+      ${p.est ? `<p class="play-note">The payout is an estimate: ${why}. ${inCents() ? `Price it on your app and buy it only if it costs less than <b>${fmtCents(worthUpTo(p.p_hit))}</b>, fee included.` : `Build it at your sportsbook and bet it only if the slip pays more than <b>${fmtOdds(p.fair_odds)}</b>.`}</p>` : ""}
       <button class="btn small ${all ? "" : "primary"}" data-act="add-play" data-keys="${esc(JSON.stringify(p.leg_keys))}" ${all ? "disabled" : ""}>${all ? "In your slip" : "Add all to slip"}</button></article>`;
 }
 const playCards = (list) => { const h = (list || []).map(playCard).join(""); return h ? `<div class="plcards">${h}</div>` : ""; };
@@ -518,7 +553,7 @@ function parlaySection() {
   }
   const intro = S.parlayTab === "value" ? "" : `<p class="note" style="margin:0 0 4px">For each ${S.parlayTab === "day" ? "day" : S.parlayTab === "group" ? "group of games" : "game"}, the best parlay at three sizes of payout.
       <b>Best</b> means the picks that give up the least to the sportsbook for that payout, so you get the most odds the picks can justify. ${S.parlayTab === "game" ? "" : "No more than two picks come from any one game. "}
-      Every added pick lowers the chance to hit, so check <b>fair odds</b>: that is what the bet needs to pay to be worth it.</p>`;
+      Every added pick lowers the chance to hit, so check the <b>fair ${inCents() ? "price" : "odds"}</b>: ${inCents() ? "the bet is worth it only if it costs less than that" : "that is what the bet needs to pay to be worth it"}.</p>`;
   return `<section class="card" id="sec-parlays"><div class="hd"><h2>🧩 Parlays</h2><span class="sub">the best to play, by day, group of games or game</span>
       <div class="right"><div class="seg" role="group" aria-label="Parlays for">${tabs.map(([k, l]) => `<button data-act="ptab" data-tab="${k}" class="${S.parlayTab === k ? "on" : ""}">${l}</button>`).join("")}</div></div></div>
     <div class="bd">${intro}${body}</div></section>`;
@@ -662,7 +697,8 @@ function gameCard(g, s, showSport) {
 function fixForm(g, s) {
   const L = g.line || {};
   const v = (x) => (x == null ? "" : x);
-  const inp = (name, val, label, step = "1") => `<label><span>${label}</span><input type="number" step="${step}" name="${name}" value="${v(val)}" aria-label="${label}"></label>`;
+  const priced = (name) => name.endsWith("_odds") || name.startsWith("ml_");  // a price, as against a line
+  const inp = (name, val, label, step = "1") => `<label><span>${priced(name) && inCents() ? label.replace("odds", "price ¢") : label}</span><input type="number" step="${priced(name) && inCents() ? "0.1" : step}" name="${name}" ${priced(name) ? 'data-price="1"' : ""} value="${priced(name) ? boxPrice(val) : v(val)}" aria-label="${label}"></label>`;
   const open = S.fixOpen === `${s.sport}|${g.game_id}`;
   return `<details class="fix" data-fix="${s.sport}|${esc(g.game_id)}" ${open ? "open" : ""}>
     <summary>${g.edited ? "Change your corrected line" : "Different at your sportsbook? Correct the line"}</summary>
@@ -994,8 +1030,8 @@ function pageProps() {
       <label class="player">Player<input type="text" list="players" data-bind="form.player" id="pf-player" value="${esc(S.form.player)}" placeholder="Start typing a name"></label>
       <label>Stat<select data-bind="form.market" id="pf-market">${markets.map(([k, l]) => `<option value="${k}" ${k === S.form.market ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></label>
       <label>Line<input type="number" step="0.5" data-bind="form.line" id="pf-line" value="${esc(S.form.line)}" placeholder="24.5"></label>
-      <label>Over odds<input type="number" step="1" data-bind="form.over" id="pf-over" value="${esc(S.form.over)}" placeholder="-110"></label>
-      <label>Under odds<input type="number" step="1" data-bind="form.under" value="${esc(S.form.under)}" placeholder="-110"></label>
+      <label>${inCents() ? "Over (Yes) price ¢" : "Over odds"}<input type="number" step="${inCents() ? "0.1" : "1"}" data-bind="form.over" id="pf-over" value="${esc(S.form.over)}" placeholder="${inCents() ? "52" : "-110"}"></label>
+      <label>${inCents() ? "Under (No) price ¢" : "Under odds"}<input type="number" step="${inCents() ? "0.1" : "1"}" data-bind="form.under" value="${esc(S.form.under)}" placeholder="${inCents() ? "50" : "-110"}"></label>
       <button class="btn primary" data-act="price-one">Price it</button>
     </div>
     <datalist id="players">${players.map((p) => `<option value="${esc(p)}">`).join("")}</datalist>
@@ -1083,7 +1119,7 @@ function parsePaste(text, sport) {
     const m = labels.find(([k, l]) => k.toLowerCase() === (parts[1] || "").toLowerCase() || l.toLowerCase() === (parts[1] || "").toLowerCase());
     const line = parseFloat(parts[2]);
     if (parts.length < 3 || !m || isNaN(line)) { bad.push(raw); continue; }
-    lines.push({ sport, player: parts[0], market: m[0], line, over_odds: parts[3] ? parseFloat(parts[3]) : null, under_odds: parts[4] ? parseFloat(parts[4]) : null, same_book: S.form.from !== "other" });
+    lines.push({ sport, player: parts[0], market: m[0], line, over_odds: parts[3] ? typedOdds(parts[3]) : null, under_odds: parts[4] ? typedOdds(parts[4]) : null, same_book: S.form.from !== "other" });
   }
   return { lines, bad };
 }
@@ -1202,8 +1238,8 @@ function hedgeFor(b) {
 }
 function hedgeCalc(b) {
   const h = ((S.board && S.board.hedges) || {})[b.id];
-  const odds = parseFloat(S.hedgeOdds[b.id] ?? (h ? h.odds : ""));
-  if (isNaN(odds) || Math.abs(odds) < 100) return `<p class="note" style="margin:8px 0 0">Type the odds your sportsbook shows right now for the other side.</p>`;
+  const odds = typedOdds(S.hedgeOdds[b.id] ?? (h ? boxPrice(h.odds) : ""));
+  if (isNaN(odds)) return `<p class="note" style="margin:8px 0 0">Type the ${inCents() ? "price in cents your app" : "odds your sportsbook"} shows right now for the other side.</p>`;
   const H = b.payout / decOf(odds), locked = b.payout - b.stake - H;
   const span = (x) => `${lineNum(x.lo)} and ${lineNum(x.hi)}`;
   return `<div class="kvs">
@@ -1223,7 +1259,7 @@ function hedgeBox(b) {
     <p class="note" style="margin:0 0 8px">One pick is left. Betting the other side now, <b>${h ? esc(h.selection) : `against ${esc(leg.selection)}`}</b>, locks in the same result whichever way it goes.
       ${h ? `The feed shows ${fmtOdds(h.odds)} for it (${esc(h.book)}). Live prices move every few seconds, so` : "The feed has no live price for it, so"} type the odds on your sportsbook.
       This is often a better deal than the cash-out button.</p>
-    <label class="cash-in">Live odds for the other side<input class="offer" type="number" step="1" inputmode="numeric" data-hedge="${esc(b.id)}" value="${esc(S.hedgeOdds[b.id] ?? (h ? h.odds : ""))}" placeholder="-110"></label>
+    <label class="cash-in">Live ${inCents() ? "price for the other side, in cents" : "odds for the other side"}<input class="offer" type="number" step="${inCents() ? "0.1" : "1"}" inputmode="decimal" data-hedge="${esc(b.id)}" value="${esc(S.hedgeOdds[b.id] ?? (h ? boxPrice(h.odds) : ""))}" placeholder="${inCents() ? "52" : "-110"}"></label>
     <div id="hedge-${esc(b.id)}">${hedgeCalc(b)}</div></div>`;
 }
 
@@ -1616,10 +1652,26 @@ function pageModel() {
 }
 
 // ============================================================================ guide
+const feeExample = () => { const f = feeOf(50); return inCents() ? `At these settings a 50¢ contract costs <b>${fmtCents(50 + f)}</b> (${fmtCents(f)} fee) and a 20¢ contract <b>${fmtCents(20 + feeOf(20))}</b>.` : ""; };
+function settingsBlock() {
+  return `<div class="prefs"><h3 style="margin-top:0">Settings: how your app shows prices</h3>
+    <div class="seg pxseg" role="group" aria-label="How prices are shown">
+      <button data-act="px-mode" data-mode="odds" class="${inCents() ? "" : "on"}">American odds <span class="muted">−110, +150</span></button>
+      <button data-act="px-mode" data-mode="cents" class="${inCents() ? "on" : ""}">Cents per contract <span class="muted">52¢</span></button></div>
+    <p class="note" style="margin:8px 0 0">${inCents()
+      ? "For a trading app, where you buy a contract that pays $1 if you are right. Every price in the tool is shown in cents, and every box takes a price in cents."
+      : "For a sportsbook. Choose <b>cents per contract</b> if you use a trading app, where you buy a contract that pays $1 if you are right."}</p>
+    ${inCents() ? `<div class="form-row" style="margin-top:10px"><label>Fee per contract, in cents<input type="number" min="0" step="0.1" data-px="flat" value="${PX.flat || ""}" placeholder="0"></label>
+        <label>Plus this % of price × (1 − price)<input type="number" min="0" step="0.5" data-px="rate" value="${PX.rate || ""}" placeholder="0"></label></div>
+      <p class="note" style="margin:8px 0 0" id="px-example">${feeExample()}</p>
+      <p class="note" style="margin:6px 0 0">Set this from your app's fee page, or every return here will look better than it is. Apps charge in different ways: a flat amount per contract goes in the first box.
+        When this was written Kalshi published 7% × price × (1 − price), which is 7 in the second box. Check, because fees change.</p>` : ""}</div>`;
+}
 function renderGuide() {
   const d = $("#guide");
-  d.innerHTML = `<div class="g-hd"><h2 id="guide-title">Guide</h2><button class="btn small" data-act="guide-close" aria-label="Close the guide">Close</button></div>
+  d.innerHTML = `<div class="g-hd"><h2 id="guide-title">Guide and settings</h2><button class="btn small" data-act="guide-close" aria-label="Close the guide">Close</button></div>
   <div class="g-bd">
+    ${settingsBlock()}
     <h3>What the tool does</h3>
     <p>It estimates how likely each bet is to win, compares that with the price your sportsbook offers, and tells you whether the bet pays enough for the risk. It never places bets: you do that at your sportsbook.</p>
     <h3>The numbers</h3>
@@ -1652,6 +1704,11 @@ function renderGuide() {
     <h3>During the games</h3>
     <p>The <b>Live</b> page follows every bet you recorded, pick by pick, with real scores and stat lines. If your sportsbook offers a cash-out, type the amount in and the tool compares it with what the bet is worth right now:
       what it would pay, times the chance the remaining picks win. Sportsbooks usually offer less than that. Cashing out can still make sense when the possible win is large next to your bankroll, and the page tells you the amount at which it does.</p>
+    <h3>Trading apps (prices in cents)</h3>
+    <p>A trading app sells a contract that pays $1 if you are right, for a price in cents, and charges a fee. Switch the tool to <b>cents per contract</b> above (or with the −110 / 52¢ switch at the top) and set the fee.
+      A price in cents is a chance: a 62¢ contract is worth buying only if the pick wins more than 62% of the time, fee included. So each pick shows <b>worth up to</b>: the most it is worth paying on your app.
+      The tool's own prices still come from a sportsbook's lines, shown in cents for comparison. Your app's price and line can differ, so type yours into the bet slip.</p>
+    <p>Selling before the game ends is the same question as a cash-out: on the Live page, type what you would get for selling into the cash-out box. The hedge box takes a price in cents too.</p>
     <h3>Betting during a game</h3>
     <p>The Live page shows the sportsbook's in-game spread, total and moneyline for games in play. The tool does <b>not</b> suggest new live bets: its live estimate is too rough to beat a live price, and it says so rather than guess.
       What it does work out is a <b>hedge</b>. When a recorded bet has one pick left and that game is on, it shows how much to bet on the other side so you finish with the same amount whichever way it goes,
@@ -1963,17 +2020,19 @@ function renderSlip() {
     const conflicts = E.conflicts && E.conflicts.length;
     html += `<div class="sum">
       ${conflicts ? `<div class="banner warn" style="margin:0">Two sides of the same bet are in the slip. Remove one.</div>` : ""}
-      <div class="kv"><span class="k">${legs.length > 1 ? `Parlay odds (${nAssumed ? "estimate" : "standard"})` : nAssumed ? "Odds (assumed)" : "Odds"}</span><span class="v">${fmtOdds(E.odds)}</span></div>
+      <div class="kv"><span class="k">${legs.length > 1 ? `${inCents() ? "Combined price" : "Parlay odds"} (${nAssumed ? "estimate" : inCents() ? "from sportsbook odds" : "standard"})` : nAssumed ? `${priceWord()} (assumed)` : inCents() ? "Sportsbook price" : "Odds"}</span><span class="v">${fmtOdds(E.odds)}</span></div>
       <div class="kv"><span class="k">${legs.length > 1 ? "Chance every pick wins" : "Win chance"}</span><span class="v">${pct(E.p_win_all)}${E.p_hit - E.p_win_all > 0.005 ? ` <span class="muted" style="font-weight:400">+${pct(E.p_hit - E.p_win_all)} push</span>` : ""}</span></div>
-      <div class="kv" title="Only bet if your sportsbook pays more than this"><span class="k">Fair odds (break-even)</span><span class="v">${fmtOdds(E.fair_odds)}</span></div>
+      <div class="kv" title="${inCents() ? "Only buy for less than this" : "Only bet if your sportsbook pays more than this"}"><span class="k">Fair ${inCents() ? "price" : "odds"} (break-even)</span><span class="v">${fmtOdds(E.fair_odds)}</span></div>
       ${nStarted ? `<div class="hint"><b>${nStarted === legs.length ? (legs.length === 1 ? "This game has" : "These games have") : `${nStarted} of these picks are from games that have`} started.</b> The odds and chances shown are the last ones before the start. Check each line matches the one you bet, type the odds from your slip, and record it: the Live page takes over from there.</div>` : ""}
       ${nAssumed ? `<div class="hint"><b>${nAssumed === legs.length ? (legs.length === 1 ? "This pick has" : "These picks have") : `${nAssumed} of these picks ${nAssumed === 1 ? "has" : "have"}`} no price in the feed.</b> The odds shown assume ${assumedOdds()} for each, a typical price. Type the real odds from your sportsbook's slip below before trusting the return.</div>` : ""}
       ${E.same_game ? `<div class="hint">These picks are from the same game and win together ×${num(E.lift, 2)} as often as unrelated picks would. Your sportsbook prices same-game parlays itself, so type in the odds it offers.</div>` : ""}
-      <div class="row"><label>Odds on your sportsbook's slip<input type="number" step="1" id="slipOdds" value="${S.slipOdds ?? ""}" aria-describedby="slipOddsHelp"></label>
-        <label>Stake $<input type="number" min="0" step="1" id="slipStake" value="${S.slipStake ?? ""}" placeholder="0"></label></div>
-      <div class="hint" id="slipOddsHelp">${legs.length > 1
-        ? `Build this same parlay at your sportsbook and copy the odds it shows for the whole bet (for example +575). The box starts at ${fmtOdds(E.odds)}, the standard price worked out from the ${legs.length} picks' own odds.`
-        : `Copy the odds your sportsbook shows for this pick right now. The box starts at the odds the tool has.`} Also check that each line above matches your sportsbook: the result is only as good as the lines.</div>
+      <div class="row"><label>${inCents() ? "Price on your app, in cents" : "Odds on your sportsbook's slip"}<input type="number" step="${inCents() ? "0.1" : "1"}" id="slipOdds" value="${S.slipOdds ?? ""}" aria-describedby="slipOddsHelp"></label>
+        <label>${inCents() ? "Spend $" : "Stake $"}<input type="number" min="0" step="1" id="slipStake" value="${S.slipStake ?? ""}" placeholder="0"></label></div>
+      <div class="hint" id="slipOddsHelp">${inCents()
+        ? `Type the price your app is asking for ${legs.length > 1 ? "this combination" : "this contract"}, in cents (for example 42 for 42¢). The box starts at ${fmtOdds(E.odds)}, what a sportsbook's odds for ${legs.length > 1 ? "these picks" : "it"} work out to. The fee (${feeText()}) is added for you. <button class="linkish" data-act="guide">Change the fee</button>`
+        : legs.length > 1
+          ? `Build this same parlay at your sportsbook and copy the odds it shows for the whole bet (for example +575). The box starts at ${fmtOdds(E.odds)}, the standard price worked out from the ${legs.length} picks' own odds.`
+          : `Copy the odds your sportsbook shows for this pick right now. The box starts at the odds the tool has.`} Also check that each line above matches your ${inCents() ? "app" : "sportsbook"}: the result is only as good as the lines.</div>
       <div id="slipCalc"></div>
       <button class="btn primary" data-act="record-bet" ${conflicts ? "disabled" : ""}>Record bet</button>
       <div class="hint">Saves it so the Live page can follow it during the games and Results can settle it afterwards. Place the actual bet at your sportsbook.</div>
@@ -1987,9 +2046,13 @@ function updateSlipCalc() {
   const box = $("#slipCalc");
   const E = S.slipEval;
   if (!box || !E) return;
-  const odds = parseFloat(S.slipOdds);
-  if (isNaN(odds) || (odds > -100 && odds < 100)) { box.innerHTML = `<div class="hint">Enter American odds: a number of 100 or more, with a minus sign for favourites (for example -110, or 250 for +250).</div>`; return; }
+  const odds = typedOdds(S.slipOdds);
+  if (isNaN(odds)) {
+    box.innerHTML = `<div class="hint">${inCents() ? "Enter the price in cents: a number between 1 and 99 (for example 42 for 42¢)." : "Enter American odds: a number of 100 or more, with a minus sign for favourites (for example -110, or 250 for +250)."}</div>`;
+    return;
+  }
   const dec = decOf(odds);
+  const typed = parseFloat(S.slipOdds), cost = inCents() ? typed + feeOf(typed) : null;  // what one contract costs, fee included
   const pw = E.p_win_all, ph = E.p_hit;
   const ev = pw * dec + (ph - pw) - 1;
   const st = settings();
@@ -2004,10 +2067,11 @@ function updateSlipCalc() {
       <div class="hint">No verdict for this one: it has a game that has started or a line different from the tool's, so the chance shown above is not the chance of this exact bet. It can still be recorded and followed.</div>`;
     return;
   }
-  let html = `<div class="kv"><span class="k">Expected return at these odds</span><span class="v ${cls(ev)}">${spct(ev)}${stake > 0 ? ` (${money(ev * stake, 2)})` : ""}</span></div>`;
+  let html = cost == null ? "" : `<div class="kv" title="The price you typed plus the fee"><span class="k">Cost of one contract, fee included</span><span class="v">${fmtCents(cost)}${stake > 0 ? ` <span class="muted" style="font-weight:400">· ${money(stake, 2)} buys ${(Math.round((stake / (cost / 100)) * 10) / 10).toLocaleString()}</span>` : ""}</span></div>`;
+  html += `<div class="kv"><span class="k">Expected return at ${inCents() ? "this price" : "these odds"}</span><span class="v ${cls(ev)}">${spct(ev)}${stake > 0 ? ` (${money(ev * stake, 2)})` : ""}</span></div>`;
   if (stake > 0) html += `<div class="kv"><span class="k">Pays if it wins</span><span class="v">${money(stake * dec, 2)}</span></div>`;
-  if (f > 0) html += `<div class="hint verdict good">${ev < 0.02 ? "A small edge at these odds: worth it only if every line and price still matches your sportsbook." : "Worth a bet at these odds."} ${S.bankroll ? `Suggested stake for your $${S.bankroll.toLocaleString()} bankroll: <button data-act="use-stake" data-v="${(S.bankroll * f).toFixed(2)}">${money(S.bankroll * f, 2)}</button>` : `Suggested stake: ${pct(f)} of your bankroll (set your bankroll at the top to see dollars).`}</div>`;
-  else html += `<div class="hint verdict bad">Not worth it at these odds: this bet loses money on average. It needs better than ${fmtOdds(E.fair_odds)}.</div>`;
+  if (f > 0) html += `<div class="hint verdict good">${ev < 0.02 ? `A small edge at ${inCents() ? "this price" : "these odds"}: worth it only if every line and price still matches your ${inCents() ? "app" : "sportsbook"}.` : `Worth a bet at ${inCents() ? "this price" : "these odds"}.`} ${S.bankroll ? `Suggested stake for your $${S.bankroll.toLocaleString()} bankroll: <button data-act="use-stake" data-v="${(S.bankroll * f).toFixed(2)}">${money(S.bankroll * f, 2)}</button>` : `Suggested stake: ${pct(f)} of your bankroll (set your bankroll at the top to see dollars).`}</div>`;
+  else html += `<div class="hint verdict bad">${inCents() ? `Not worth it at this price: this bet loses money on average. It needs a price below ${fmtCents(worthUpTo(pw))}, before the fee.` : `Not worth it at these odds: this bet loses money on average. It needs better than ${fmtOdds(E.fair_odds)}.`}</div>`;
   box.innerHTML = html;
 }
 
@@ -2081,6 +2145,18 @@ document.addEventListener("click", async (e) => {
     renderMain(); return;
   }
   if (act === "toggle") { e.preventDefault(); await toggleLeg(a.dataset.key); return; }
+  if (act === "px-mode") {
+    if (a.dataset.mode === PX.mode) return;
+    const was = typedOddsRaw(S.slipOdds);
+    PX.mode = a.dataset.mode;
+    localStorage.setItem("px_mode", PX.mode);
+    S.slipOdds = isNaN(was) ? S.slipOdds : boxPrice(was);  // the same price, written the other way
+    S.hedgeOdds = {}; S.form.over = ""; S.form.under = "";
+    syncPx(); renderMain(); renderSlip();
+    if ($("#guide").open) renderGuide();
+    toast(inCents() ? "Prices are now shown in cents per contract" : "Prices are now shown as American odds");
+    return;
+  }
   if (act === "import-toggle") { S.importOpen = !S.importOpen; renderSlip(); if (S.importOpen) { const t = $("#impText"); if (t) t.focus(); } return; }
   if (act === "import-read") {
     const text = ($("#impText") || {}).value || "";
@@ -2093,7 +2169,7 @@ document.addEventListener("click", async (e) => {
         S.slip = picks.map((x) => x.key);
         S.slipLines = {};
         for (const x of picks) if (x.line != null) S.slipLines[x.key] = x.line;
-        S.keepOdds = res.odds;  // the odds on the slip, not the standard price
+        S.keepOdds = res.odds;  // the odds on the slip, not the standard price (shown in cents if that is the setting)
         if (res.stake != null) S.slipStake = res.stake;
         S.importOpen = false; S.importText = "";
         saveSlip(); await evalSlip();
@@ -2142,8 +2218,8 @@ document.addEventListener("click", async (e) => {
     S.track = null; renderMain(); return;
   }
   if (act === "record-bet") {
-    const odds = parseFloat(S.slipOdds), stake = parseFloat(S.slipStake);
-    if (isNaN(odds) || !(stake > 0)) { toast("Enter the odds and a stake first"); return; }
+    const odds = typedOdds(S.slipOdds), stake = parseFloat(S.slipStake);
+    if (isNaN(odds) || !(stake > 0)) { toast(inCents() ? "Enter the price in cents and how much you spent first" : "Enter the odds and a stake first"); return; }
     try {
       const lines = {};
       for (const k of S.slip) { const v = parseFloat(S.slipLines[k]), l = S.legs[k]; if (l && !isNaN(v) && l.line != null && Math.abs(v - l.line) > 1e-9) lines[k] = v; }
@@ -2158,7 +2234,8 @@ document.addEventListener("click", async (e) => {
   if (act === "fix-save" || act === "fix-reset") {
     const box = a.closest("details.fix"), grid = $(".fix-grid", box);
     const body = { sport: grid.dataset.sport, game_id: grid.dataset.game, reset: act === "fix-reset" };
-    if (!body.reset) for (const i of $$("input", grid)) if (i.value !== "") body[i.name] = parseFloat(i.value);
+    if (!body.reset) for (const i of $$("input", grid)) if (i.value !== "") body[i.name] = i.dataset.price ? typedOdds(i.value) : parseFloat(i.value);
+    if (!body.reset && Object.values(body).some((x) => typeof x === "number" && isNaN(x))) { toast(inCents() ? "Prices must be between 1 and 99 cents" : "Odds must be American odds, such as -110 or +120"); return; }
     a.disabled = true;
     try {
       await api("/api/games/line", { method: "POST", body: JSON.stringify(body) });
@@ -2190,7 +2267,7 @@ document.addEventListener("click", async (e) => {
     const line = parseFloat(f.line);
     if (!f.player || isNaN(line)) { S.priceErrors = ["Enter a player and a line."]; renderMain(); return; }
     if (f.over === "" && f.under === "") { S.priceErrors = ["Enter the odds for at least one side (for example -110)."]; renderMain(); return; }
-    await priceLines([{ sport: f.sport, player: f.player, market: f.market, line, over_odds: f.over === "" ? null : parseFloat(f.over), under_odds: f.under === "" ? null : parseFloat(f.under), same_book: f.from !== "other" }]);
+    await priceLines([{ sport: f.sport, player: f.player, market: f.market, line, over_odds: f.over === "" ? null : typedOdds(f.over), under_odds: f.under === "" ? null : typedOdds(f.under), same_book: f.from !== "other" }]);
     return;
   }
   if (act === "price-many") {
@@ -2219,6 +2296,14 @@ document.addEventListener("input", (e) => {
   if (t.id === "slipOdds") { S.slipOdds = t.value; updateSlipCalc(); return; }
   if (t.dataset.lineKey) { S.slipLines[t.dataset.lineKey] = t.value; updateSlipCalc(); return; }
   if (t.id === "impText") { S.importText = t.value; return; }
+  if (t.dataset.px) {
+    PX[t.dataset.px] = Math.max(parseFloat(t.value) || 0, 0);
+    localStorage.setItem(`px_${t.dataset.px}`, PX[t.dataset.px]);
+    const ex = $("#px-example"); if (ex) ex.innerHTML = feeExample();
+    updateSlipCalc();
+    clearTimeout(window._px); window._px = setTimeout(() => { renderMain(); renderSlip(); }, 500);
+    return;
+  }
   if (t.id === "slipStake") { S.slipStake = t.value; updateSlipCalc(); return; }
   const bind = t.dataset.bind;
   if (!bind) return;
@@ -2266,6 +2351,7 @@ window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer
 
 // ============================================================================ boot
 $("#bankroll").value = S.bankroll || "";
+syncPx();
 renderStatus();
 renderMain();
 renderSlip();
