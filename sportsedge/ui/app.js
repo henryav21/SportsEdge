@@ -28,6 +28,7 @@ const S = {
   slipRung: JSON.parse(localStorage.getItem("slip_rungs") || "{}"), rungAll: {},  // picks taken as "N or more"; ladders shown in full
   gday: null, gOpen: {}, gq: "", findOpen: false,  // Today's games: the day shown, the games opened, the finder's text
   held: null, needAll: false,                      // what the open bets already hold; the Live page's full list
+  liveView: null, betOpen: {}, liveMore: {},       // Live page: which bets are listed (null = follow the action), bets opened, lists shown in full
   lottoScope: null, lottoStake: parseFloat(localStorage.getItem("lotto_stake") || "10") || 10, lottoOpen: {},  // lottery tickets: which games, the stake, lists opened
   board: null, hedgeOdds: {},   // live prices for games in play; the odds typed into each hedge box
   importOpen: false, importText: "", importNote: null, importSingles: null, slipPayout: "",   // paste a slip from the sportsbook   // games that have started; per game: chosen stat, "show all"; lines typed in the slip
@@ -1489,18 +1490,103 @@ const LEG_STATUS = {
   void: ["–", "Void: this pick drops out", "s-void"], live: ["●", "In play", "s-live"], pre: ["○", "Not started", "s-pre"],
 };
 
-function liveLeg(v) {
+/* ---- progress bars ----
+   Every pick in play gets a bar: the count so far on a knob, the line as a marker. A bar glides from where it
+   stood at the last check to where it stands now, so a change is seen and an unchanged bar stays still. */
+const trackWas = {};
+function glide(id, to) {
+  const from = id in trackWas ? trackWas[id] : to;
+  trackWas[id] = to;
+  return `--from:${from}%;--to:${to}%`;
+}
+const isSide = (v) => v.market_key === "ml" || v.market_key === "spread";
+/* How far along a pick is, 0 to 1: an over by its count, anything else by the game clock. */
+function legDone(v) {
+  if (v.decided) return 1;
+  if (v.state !== "in") return 0;
+  if (v.complete != null) return v.complete;
+  return !isSide(v) && v.side !== "under" && v.progress != null ? v.progress : null;  // an older server sends no clock
+}
+const trackTone = (v, live) => (v.decided ? (v.status === "won" ? "good" : v.status === "lost" ? "bad" : "flat") : live);
+
+/* A count against a line: points, yards, a game's total. */
+function countTrack(v, id) {
+  const L = Number(v.line), x = Number(v.current), under = v.side === "under";
+  const top = Math.max(L * 1.25, x * 1.04, 1);
+  const at = (n) => +Math.max(0, Math.min(100, (100 * n) / top)).toFixed(1);
+  const past = x > L, edge = under && !past && v.goal != null && x >= v.goal;
+  const tone = trackTone(v, under ? (past ? "bad" : edge ? "warn" : "hold") : past ? "good" : "go");
+  const rung = /\d\+/.test(v.selection || "") && v.goal != null;
+  const tip = under ? `The bar is the count so far. The marker is the line: it has to finish to the left of it.` : `The bar is the count so far. The marker is the line: it has to get past it.`;
+  return `<div class="trk ${tone}" role="img" title="${tip}" aria-label="${lineNum(x)} so far, the line is ${lineNum(L)}" style="${glide(id, at(x))};--mark:${at(L)}%">
+      <div class="trk-rail"><i></i></div><span class="trk-mark"></span><b class="trk-knob">${lineNum(x)}</b>
+      <span class="trk-goal">${rung ? `needs ${lineNum(v.goal)}` : `line ${lineNum(L)}`}</span></div>`;
+}
+/* A pick to win, or against a spread: the lead or deficit, with the margin it needs marked. */
+function marginTrack(v, id) {
+  const m = Number(v.current), t = v.market_key === "spread" ? -Number(v.line) : 0;
+  const span = Math.max(10, Math.ceil(Math.max(Math.abs(m), Math.abs(t)) * 1.3 + 3));
+  const at = (n) => +(50 + (50 * Math.max(-span, Math.min(span, n))) / span).toFixed(1);
+  const tone = trackTone(v, m === t ? "flat" : m > t ? "good" : "bad");
+  const a = at(Math.min(m, t)), w = +(at(Math.max(m, t)) - a).toFixed(1);
+  const lead = m > 0 ? `ahead by ${lineNum(m)}` : m < 0 ? `behind by ${lineNum(-m)}` : "level";
+  const tip = `The middle is a level game, right of it is ahead and left is behind. The marker is what this pick needs: green when it is past it, red when it is short.`;
+  return `<div class="trk mar ${tone}" role="img" title="${tip}" aria-label="${lead}" style="${glide(id, at(m))};--mark:${at(t)}%;--a:${a}%;--w:${w}%">
+      <div class="trk-rail"><i></i></div>${t !== 0 ? '<span class="trk-zero"></span>' : ""}<span class="trk-mark"></span>
+      <b class="trk-knob">${m > 0 ? "+" : m < 0 ? "−" : ""}${lineNum(Math.abs(m))}</b>
+      <span class="trk-goal">${t === 0 ? "level" : "the spread"}</span></div>`;
+}
+/* Touchdowns: one football for each one needed, lit as they are scored. */
+function tdTrack(v) {
+  const n = Math.max(1, Math.round(v.goal || Math.ceil(v.line || 0.5))), have = Math.min(Math.round(v.current || 0), n);
+  return `<div class="pips ${trackTone(v, "go")}" role="img" aria-label="${have} of ${n} touchdown${n === 1 ? "" : "s"}">${Array.from({ length: n }, (_, i) => `<i class="${i < have ? "on" : ""}">🏈</i>`).join("")}</div>`;
+}
+function legTrack(v, id) {
+  if (v.current == null || v.state === "pre") return "";
+  if (isSide(v)) return marginTrack(v, id);
+  if (v.market_key === "anytime_td") return tdTrack(v);
+  return v.line == null ? "" : countTrack(v, id);
+}
+/* One bet's picks as a strip, a piece for each in the order listed below it: green in, red missed, part-filled in play. */
+function betTrack(b) {
+  const legs = b.legs || [];
+  if (!legs.length) return "";
+  const piece = (v) => {
+    const st = v.decided ? v.status : v.state === "in" ? "live" : "pre";
+    const d = legDone(v), w = st === "pre" ? 0 : d == null ? 100 : Math.max(Math.round(100 * d), st === "live" ? 6 : 0);
+    const say = { won: "in", lost: "missed", push: "push, drops out", void: "void, drops out", pre: "not started", live: d == null ? "in play" : `in play, ${Math.round(100 * d)}% of the way` }[st] || st;
+    return `<span class="bseg ${st} ${st === "live" && d == null ? "wait" : ""}" title="${esc(v.selection)}: ${say}"><i style="width:${w}%"></i></span>`;
+  };
+  const live = legs.filter((v) => !v.decided && v.state === "in"), wait = legs.filter((v) => !v.decided && v.state !== "in").length;
+  const out = legs.filter((v) => v.status === "push" || v.status === "void").length;
+  let head, tail = [];
+  if (b.n === 1) {
+    const v = legs[0], d = legDone(v);
+    head = v.decided ? (v.status === "won" ? "It came in" : v.status === "lost" ? "It missed" : "Dropped out") : v.state !== "in" ? "Not started"
+      : d == null ? "In play" : !isSide(v) && v.side !== "under" ? `<b>${Math.round(100 * d)}%</b> of the way to its number` : `<b>${Math.round(100 * d)}%</b> of the game played`;
+  } else {
+    head = `<b>${b.won} of ${b.n}</b> picks in`;
+    if (live.length) tail.push(`${live.length} in play`);
+    if (wait) tail.push(`${wait} not started`);
+    if (b.lost) tail.push(`${b.lost} missed`);
+    if (out) tail.push(`${out} dropped out`);
+  }
+  return `<div class="btrack" role="img" aria-label="${b.n === 1 ? "Progress" : `${b.won} of ${b.n} picks in`}">
+      <div class="btrack-top"><span>${head}</span><span class="muted">${tail.join(" · ")}</span></div>
+      <div class="bsegs">${legs.map(piece).join("")}</div></div>`;
+}
+
+function liveLeg(v, id, o = {}) {
   const [icon, label, klass] = LEG_STATUS[v.status] || LEG_STATUS.pre;
   const where = v.state === "pre" ? `starts ${when(v.start)}` : `${esc(v.detail)}${v.score ? ` · ${esc(v.score)}` : ""}`;
   const show = v.current != null && v.state !== "pre";
-  const cur = !show ? "" : v.market_key === "ml" || v.market_key === "spread" ? esc(v.need)
-    : `<b>${lineNum(v.current)}</b>${v.line != null && v.market_key !== "anytime_td" ? ` <span class="muted">of ${lineNum(v.line)}</span>` : ""} · ${esc(v.need)}`;
-  const bar = show && v.progress != null && v.market_key !== "anytime_td" ? `<span class="meter wide ${v.side === "under" ? "under" : ""}" aria-hidden="true"><i style="width:${Math.round(v.progress * 100)}%"></i></span>` : "";
+  const cur = show ? esc(v.need) : "";
+  const bar = show ? legTrack(v, id) : "";
   const chance = v.decided ? "" : `<div class="lchance" title="Rough live estimate. Before the game it was ${pct(v.p_pre, 0)}.">${pct(v.p_now, 0)}<span class="muted"> chance now</span>${v.state === "in" ? `<div class="muted">was ${pct(v.p_pre, 0)}</div>` : ""}</div>`;
   return `<li class="lleg ${klass}"><span class="lic" title="${label}" aria-label="${label}">${icon}</span>
     <div class="lmain"><div class="pick">${esc(v.selection)}</div><div class="sub2">${esc(v.game)} · ${where}</div>
-      ${cur ? `<div class="lcur">${cur}</div>${bar}` : v.need ? `<div class="lcur">${esc(v.need)}</div>` : ""}
-      ${sinceBet(v.move, v.market_key)}</div>
+      ${cur ? `<div class="lcur"><b>${cur}</b></div>${bar}` : v.need ? `<div class="lcur">${esc(v.need)}</div>` : ""}
+      ${o.note || ""}${o.brief ? "" : sinceBet(v.move, v.market_key)}</div>
     ${v.decided ? `<span class="rate ${v.status === "won" ? "r-value" : v.status === "lost" ? "r-poor" : "r-fair"}">${label.split(":")[0]}</span>` : chance}</li>`;
 }
 
@@ -1560,24 +1646,95 @@ function hedgeBox(b) {
     <div id="hedge-${esc(b.id)}">${hedgeCalc(b)}</div></div>`;
 }
 
+/* ---- finding what is in play ----
+   A bet is "in play" while one of its picks is being played, "coming up" while it is alive with nothing on right
+   now, and "finished" once it is settled or can no longer win. */
+const legLive = (v) => !v.decided && v.state === "in";
+const betAlive = (b) => !b.error && (b.status === "pre" || b.status === "live");
+const betGroup = (b) => (b.error ? "next" : !betAlive(b) ? "done" : (b.legs || []).some(legLive) ? "inplay" : "next");
+const nextStart = (b) => Math.min(...(b.legs || []).filter((v) => !v.decided && v.start).map((v) => Date.parse(v.start)).filter((t) => !isNaN(t)), Infinity);
+function liveGroups(bets) {
+  const G = { inplay: [], next: [], done: [] };
+  for (const b of bets) G[betGroup(b)].push(b);
+  G.inplay.sort((x, y) => x.open - y.open || y.payout - x.payout);            // closest to finishing first
+  G.next.sort((x, y) => nextStart(x) - nextStart(y) || y.payout - x.payout);  // soonest first
+  return G;
+}
+
+/* Every pick being played right now, once each however many bets hold it, with its bar. */
+function inPlayCard(bets) {
+  const by = new Map();
+  for (const b of bets) {
+    if (!betAlive(b)) continue;
+    for (const v of b.legs || []) {
+      if (!legLive(v)) continue;
+      const k = `${v.key}@${v.line ?? ""}`;
+      if (!by.has(k)) by.set(k, { v, k, bets: 0, payout: 0 });
+      const e = by.get(k);
+      e.bets += 1; e.payout += b.payout;
+    }
+  }
+  const list = [...by.values()].sort((x, y) => y.payout - x.payout);
+  if (!list.length) return "";
+  const games = [...new Set(list.map((e) => e.v.game))];  // a game's picks together, the game with the most money on it first
+  list.sort((x, y) => games.indexOf(x.v.game) - games.indexOf(y.v.game) || y.payout - x.payout);
+  const nb = bets.filter((b) => betGroup(b) === "inplay").length;
+  return `<section class="card now" id="sec-now"><div class="hd"><h2>🔴 In play now</h2>
+      <span class="sub">${list.length} pick${list.length === 1 ? "" : "s"} being played right now, across ${nBets(nb)}</span></div>
+    <div class="bd"><ol class="live-legs">${list.map((e) => liveLeg(e.v, `now|${e.k}`, { brief: true, note: `<div class="lride"><b>${money(e.payout, 2)}</b> rides on it · ${nBets(e.bets)}</div>` })).join("")}</ol></div></section>`;
+}
+
+/* The picks a folded bet is not showing, by name, so the bet can be recognised without opening it. */
+function betRest(hidden) {
+  const names = (list) => list.map((v) => esc(v.selection)).join(" · ");
+  const row = (list, label, klass = "", lead = "") => (list.length ? `<div class="brest"><span class="bk ${klass}">${label} (${list.length})</span>${lead}${names(list)}</div>` : "");
+  const todo = hidden.filter((v) => !v.decided).sort((x, y) => (Date.parse(x.start) || 0) - (Date.parse(y.start) || 0));
+  const later = todo.filter((v) => v.state !== "in");
+  return row(todo.filter((v) => v.state === "in"), "Still playing")
+    + row(later, "Still to start", "", later.length && later[0].start ? `<span class="muted">from ${when(later[0].start)}: </span>` : "")
+    + row(hidden.filter((v) => v.status === "won"), "✓ In", "ok")
+    + row(hidden.filter((v) => v.status === "lost"), "✕ Missed", "no")
+    + row(hidden.filter((v) => v.status === "push" || v.status === "void"), "Dropped out");
+}
+
+/* One bet. Folded, it shows the money in a line, its strip, and only the picks being played right now; the rest
+   are named underneath. Opened, it shows every pick, the cash-out check and the hedge. */
 function liveBet(b) {
   if (b.error) return `<section class="card"><div class="hd"><h2>${esc(b.label)}</h2></div><div class="bd"><div class="banner warn">This bet could not be read: ${esc(b.error)}</div></div></section>`;
   const pill = { won: ["Won", "r-value"], lost: ["Lost", "r-poor"], push: ["Push: stake returned", "r-fair"], live: [`${b.won} of ${b.n} won · ${b.open} to go`, "r-lean"], pre: ["Not started", "r-fair"] }[b.status] || ["", "r-fair"];
-  const first = S.liveFirst[b.id];
-  const moved = b.open && first != null && Math.abs(b.value - first) >= 0.01 ? `<div class="delta ${cls(b.value - first)}">${b.value > first ? "up" : "down"} from ${money(first, 2)} when you opened this page</div>` : `<div class="delta">${b.open ? `${pct(b.p_all, b.p_all < 0.1 ? 1 : 0)} chance everything left wins` : b.status === "won" ? "paid in full" : ""}</div>`;
-  return `<section class="card live-bet"><div class="hd"><h2>${b.n === 1 ? "Single bet" : `${b.n}-pick parlay`}</h2>
-      <span class="sub">${money(b.stake, 2)} at ${fmtOdds(b.odds)}${b.placed_at ? ` · recorded ${new Date(b.placed_at).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" })}` : ""}</span>
-      <div class="right"><span class="rate ${pill[1]}">${pill[0]}</span></div></div>
-    <div class="bd">
-      <div class="tiles live-tiles">
+  const id = String(b.id), open = !!S.betOpen[id], rows = b.legs.map((v, i) => [v, i]);
+  const playing = betAlive(b) ? rows.filter(([v]) => legLive(v)) : [];
+  const shown = open ? rows : playing, hidden = open ? [] : rows.filter((r) => !playing.includes(r)).map(([v]) => v);
+  const chance = pct(b.p_all, b.p_all < 0.1 ? 1 : 0);
+  let body;
+  if (open) {
+    const first = S.liveFirst[b.id];
+    const moved = b.open && first != null && Math.abs(b.value - first) >= 0.01 ? `<div class="delta ${cls(b.value - first)}">${b.value > first ? "up" : "down"} from ${money(first, 2)} when you opened this page</div>` : `<div class="delta">${b.open ? `${chance} chance everything left wins` : b.status === "won" ? "paid in full" : ""}</div>`;
+    body = `<div class="tiles live-tiles">
         <div class="tile"><div class="label">Worth right now</div><div class="value ${b.status === "lost" ? "neg" : ""}">${money(b.value, 2)}</div>${moved}</div>
         <div class="tile"><div class="label">Pays if it all wins</div><div class="value">${money(b.payout, 2)}</div><div class="delta">${money(b.profit_if_win, 2)} profit on ${money(b.stake, 2)}</div></div>
         <div class="tile"><div class="label">Picks</div><div class="value">${b.won}<span class="muted" style="font-size:15px"> of ${b.n} won</span></div><div class="delta">${b.open} still to settle${b.lost ? ` · ${b.lost} lost` : ""}</div></div>
-      </div>
-      <ol class="live-legs">${b.legs.map(liveLeg).join("")}</ol>
-      ${b.open && b.p_all > 0 && b.open > 1 ? `<p class="note">The chance everything left wins (${pct(b.p_all, b.p_all < 0.1 ? 1 : 0)}) multiplies the chances above${b.same_game ? ". Some remaining picks are in the same game; they are treated as unrelated here, which can understate or overstate the true chance" : ""}.</p>` : ""}
-      ${cashBox(b)}
-      ${hedgeBox(b)}
+      </div>`;
+  } else {
+    body = `<div class="bmoney">${b.status === "won" ? `<span>Paid <b class="pos">${money(b.payout, 2)}</b></span><span>${gain(b.profit_if_win)} profit</span>`
+      : b.status === "lost" ? `<span>Lost the <b class="neg">${money(b.stake, 2)}</b> stake</span><span>it would have paid ${money(b.payout, 2)}</span>`
+      : b.status === "push" ? `<span>Stake returned: <b>${money(b.payout, 2)}</b></span>`
+      : `<span><b>${money(b.payout, 2)}</b> if it all wins</span><span>worth <b>${money(b.value, 2)}</b> now</span><span>${chance} chance</span>`}</div>`;
+  }
+  const more = hedgeFor(b) ? "picks, cash-out and hedge" : b.open && b.value > 0 ? "picks and cash-out" : "picks";
+  const toggle = open ? "Show less ▴" : b.n === 1 ? `Show ${more.replace("picks", "details")} ▾` : `Show all ${b.n} ${more} ▾`;
+  return `<section class="card live-bet ${open ? "open" : "shut"}" id="bet-${esc(id)}"><div class="hd"><h2>${b.n === 1 ? "Single bet" : `${b.n}-pick parlay`}</h2>
+      <span class="sub">${money(b.stake, 2)} at ${fmtOdds(b.odds)}${b.placed_at ? ` · recorded ${new Date(b.placed_at).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" })}` : ""}</span>
+      <div class="right"><span class="rate ${pill[1]}">${pill[0]}</span>
+        <button class="bet-caret" data-act="bet-toggle" data-id="${esc(id)}" aria-expanded="${open}" aria-label="${open ? "Show less of this bet" : "Show every pick of this bet"}">${open ? "▴" : "▾"}</button></div></div>
+    <div class="bd">
+      ${body}
+      ${betTrack(b)}
+      ${shown.length ? `<ol class="live-legs">${shown.map(([v, i]) => liveLeg(v, `${id}|${i}`, { brief: !open })).join("")}</ol>` : ""}
+      ${betRest(hidden)}
+      ${open && b.open && b.p_all > 0 && b.open > 1 ? `<p class="note">The chance everything left wins (${chance}) multiplies the chances above${b.same_game ? ". Some remaining picks are in the same game; they are treated as unrelated here, which can understate or overstate the true chance" : ""}.</p>` : ""}
+      ${open ? cashBox(b) + hedgeBox(b) : ""}
+      <button class="bet-toggle" data-act="bet-toggle" data-id="${esc(id)}">${toggle}</button>
     </div></section>`;
 }
 
@@ -1632,31 +1789,6 @@ function scoreboard() {
       It is logging live prices against results so that can be tested. What it can work out exactly is a <b>hedge</b>: it appears on any recorded bet with one pick left.</p>` : ""}</div></section>`;
 }
 
-/* Everything that depends on each game: a parlay counts in full for every game it still needs, because any
-   one of them can lose it. */
-function exposure(open) {
-  const games = new Map();
-  for (const b of open) {
-    const left = b.legs.filter((v) => !v.decided);
-    for (const name of new Set(left.map((v) => v.game))) {
-      if (!games.has(name)) games.set(name, { game: name, stake: 0, pays: 0, bets: 0, picks: [], state: "pre", detail: "", score: "", start: null });
-      const g = games.get(name), mine = left.filter((v) => v.game === name);
-      g.stake += b.stake; g.pays += b.payout; g.bets += 1;
-      for (const v of mine) { g.picks.push(v.selection); if (v.state === "in") { g.state = "in"; g.detail = v.detail; g.score = v.score; } g.start = g.start || v.start; }
-    }
-  }
-  const list = [...games.values()].sort((a, b) => b.stake - a.stake);
-  if (list.length < 2 && open.length < 2) return "";
-  const total = open.reduce((n, b) => n + b.stake, 0);
-  return `<section class="card"><div class="hd"><h2>What is riding on each game</h2><span class="sub">${money(total, 2)} staked across ${open.length} open bet${open.length === 1 ? "" : "s"}</span></div>
-    <div class="bd"><div class="expo">${list.map((g) => `<div class="ex ${g.state === "in" ? "live" : ""}">
-        <div class="ex-hd"><b>${esc(g.game)}</b><span class="muted">${g.state === "in" ? `<span class="sc-live"><span class="dot"></span>Live</span> ${esc(g.detail)}` : g.start ? `starts ${when(g.start)}` : ""}</span></div>
-        <div class="ex-amt" title="The stakes of every open bet that still needs this game">${money(g.stake, 2)}<small>${total > 0 ? ` · ${pct(g.stake / total, 0)} of what you have staked` : ""}</small></div>
-        <div class="ex-bar" aria-hidden="true"><i style="width:${total > 0 ? Math.round((100 * g.stake) / total) : 0}%"></i></div>
-        <div class="muted ex-picks">${g.bets} bet${g.bets === 1 ? "" : "s"}: ${[...new Set(g.picks)].map(esc).join(", ")}</div></div>`).join("")}</div>
-      <p class="note" style="margin:10px 0 0">A parlay counts in full for every game it still needs, since any one of them can lose it. So these can add up to more than you have staked.</p></div></section>`;
-}
-
 /* Money won or lost, with its sign: +$15.00, −$10.00, $0.00. */
 const gain = (x) => (x == null || isNaN(x) ? "–" : `${x > 0.004 ? "+" : ""}${money(Math.abs(x) < 0.005 ? 0 : x, 2)}`);
 const nBets = (n) => `${n} bet${n === 1 ? "" : "s"}`;
@@ -1683,41 +1815,49 @@ function payoutCard() {
     ${B.n_alive ? `<p class="pay-foot">On average the bets still alive are worth about <b>${money(B.expected - B.won, 2)}</b> right now, at the tool's live estimates. The total above needs every one of them to win.</p>` : ""}</section>`;
 }
 
-/* Every pick the bets still alive depend on, across all of them: how many bets need it, what rides on it and
-   how it stands. One list to watch, instead of reading every bet. */
+/* What the bets still alive need from the games that have not started: a game at a time, the next one first,
+   with every pick needed from it, how many bets need each and what those bets pay. Picks being played have
+   their own card at the top of the page, and a settled pick needs nothing more, so neither is listed. */
 function needsCard(bets) {
-  const by = new Map();
+  const flip = { over: "under", under: "over", home: "away", away: "home" };
+  const sideOf = (v, side) => { const p = String(v.key).split("|"); return `${p[0]}|${p[1]}|${p[2]}|${side || p[3]}|${p[4] || ""}`; };
+  const held = new Set(), games = new Map();
   for (const b of bets) {
-    if (b.status !== "pre" && b.status !== "live") continue;  // settled, or already lost: nothing left to need
+    if (!betAlive(b)) continue;  // settled, or already lost: nothing left to need
+    const counted = new Set();
     for (const v of b.legs || []) {
-      const k = `${v.key}@${v.line ?? ""}`;
-      if (!by.has(k)) by.set(k, { v, bets: 0, payout: 0 });
-      const e = by.get(k);
+      if (v.decided) continue;
+      held.add(sideOf(v));
+      if (legLive(v)) continue;
+      const gk = `${v.sport}|${v.game}`, at = Date.parse(v.start);
+      if (!games.has(gk)) games.set(gk, { game: v.game, sport: v.sport, at: null, iso: null, bets: 0, stake: 0, picks: new Map() });
+      const g = games.get(gk);
+      if (!isNaN(at) && (g.at == null || at < g.at)) { g.at = at; g.iso = v.start; }
+      if (!counted.has(gk)) { counted.add(gk); g.bets += 1; g.stake += b.stake; }
+      const pk = `${v.key}@${v.line ?? ""}`;
+      if (!g.picks.has(pk)) g.picks.set(pk, { v, bets: 0, payout: 0 });
+      const e = g.picks.get(pk);
       e.bets += 1; e.payout += b.payout;
     }
   }
-  const list = [...by.values()];
-  if (list.length < 2) return "";
+  const list = [...games.values()].sort((x, y) => (x.at ?? Infinity) - (y.at ?? Infinity) || String(x.game).localeCompare(String(y.game)));
+  if (!list.length) return "";
   // the same bet held both ways across different slips: both cannot win (or only in a narrow middle)
-  const flip = { over: "under", under: "over", home: "away", away: "home" };
-  const sides = new Set(list.filter((e) => !e.v.decided).map((e) => { const p = String(e.v.key).split("|"); return `${p[0]}|${p[1]}|${p[2]}|${p[3]}|${p[4] || ""}`; }));
-  const both = (v) => { const p = String(v.key).split("|"); return !!flip[p[3]] && sides.has(`${p[0]}|${p[1]}|${p[2]}|${flip[p[3]]}|${p[4] || ""}`); };
-  const rank = (e) => (e.v.decided ? 2 : e.v.state === "in" ? 0 : 1);
-  list.sort((a, b) => rank(a) - rank(b) || b.payout - a.payout || String(a.v.start).localeCompare(String(b.v.start)));
-  const left = list.filter((e) => !e.v.decided).length, shown = S.needAll ? list : list.slice(0, 8);
-  const row = (e) => {
-    const v = e.v, live = !v.decided && v.state === "in";
-    const where = v.decided ? (v.status === "won" ? "done: it came in" : v.status) : live ? `${esc(v.detail || "in play")}${v.need ? ` · ${esc(v.need)}` : ""}` : `starts ${when(v.start)}`;
-    return `<div class="need ${v.decided ? esc(v.status) : ""}">
-      <div class="nd-sel">${esc(v.selection)}${live ? '<span class="nd-tag live">Live</span>' : ""}${v.status === "won" ? '<span class="nd-tag">✓ in</span>' : ""}${!v.decided && both(v) ? '<span class="nd-tag warn" title="Another of your bets needs the other side of this.">you hold both sides</span>' : ""}</div>
-      <div class="nd-pay"><b>${money(e.payout, 2)}</b><small>rides on it · ${nBets(e.bets)}</small></div>
-      <div class="nd-sub">${esc(v.game)} · ${where}${v.decided ? "" : ` · chance now <b>${pct(v.p_now, 0)}</b>`}</div>
-      <div class="nd-bar" aria-hidden="true"><i style="width:${v.decided ? (v.status === "won" ? 100 : 0) : Math.round(100 * (v.p_now || 0))}%"></i></div></div>`;
-  };
-  return `<section class="card"><div class="hd"><h2>🎯 What you need</h2><span class="sub">${left} pick${left === 1 ? "" : "s"} still to come in across your live bets · the most money first</span></div>
-    <div class="bd"><div class="needs">${shown.map(row).join("")}</div>
-      ${list.length > 8 ? `<div class="more"><button class="btn small" data-act="need-all">${S.needAll ? "Show fewer" : `Show all ${list.length}`}</button></div>` : ""}
-      <p class="note" style="margin:10px 0 0">“Rides on it” is the payout of every bet that needs the pick, so one pick in several parlays counts each of them. A bet that has already lost is left out.</p></div></section>`;
+  const both = (v) => { const side = String(v.key).split("|")[3]; return !!flip[side] && held.has(sideOf(v, flip[side])); };
+  const nPicks = list.reduce((n, g) => n + g.picks.size, 0), CAP = 4;
+  const shown = S.needAll || list.length <= CAP + 1 ? list : list.slice(0, CAP);
+  const row = (e) => `<div class="up-row"><span class="up-pick">${esc(e.v.selection)}${both(e.v) ? '<span class="nd-tag warn" title="Another of your bets needs the other side of this.">you hold both sides</span>' : ""}</span>
+      <span class="up-ch" title="The tool's estimate that this pick wins"><b>${pct(e.v.p_now, 0)}</b> chance</span>
+      <span class="up-by" title="How many of your bets need this pick, and what those bets pay if they win">needed by <b>${nBets(e.bets)}</b> paying <b>${money(e.payout, 2)}</b></span></div>`;
+  const block = (g) => `<div class="up-game"><div class="up-hd"><b>${SPORT_ICON[String(g.sport).toLowerCase()] || ""} ${esc(g.game)}</b><span class="muted">${g.iso ? `starts ${when(g.iso)}` : "start time not known"}</span>
+      <span class="up-sum" title="The stakes of every bet that still needs this game">${nBets(g.bets)} need${g.bets === 1 ? "s" : ""} this game · ${money(g.stake, 2)} staked</span></div>
+      ${[...g.picks.values()].sort((x, y) => y.bets - x.bets || y.payout - x.payout).map(row).join("")}</div>`;
+  return `<section class="card" id="sec-needs"><div class="hd"><h2>🎯 What you need next</h2>
+      <span class="sub">${nPicks} pick${nPicks === 1 ? "" : "s"} still to start, in ${list.length} game${list.length === 1 ? "" : "s"} · the next game first</span></div>
+    <div class="bd"><div class="ups">${shown.map(block).join("")}</div>
+      ${list.length > CAP + 1 ? `<div class="more"><button class="btn small" data-act="need-all">${S.needAll ? "Show fewer games" : `Show all ${list.length} games`}</button></div>` : ""}
+      <p class="note" style="margin:10px 0 0">A parlay needs every one of its picks, so the same bet is counted under each game it still needs. That is why the amounts here add up to more than you have staked, and to more than your total payout.
+        Picks being played right now are at the top of the page, and a bet that has already lost is left out.</p></div></section>`;
 }
 
 /* Profit or loss on settled bets: today, this week, this month, this year. */
@@ -1744,15 +1884,34 @@ function pageLive() {
       It then shows up on this page with live scores, and you can check any cash-out offer against it.
       ${S.started.length ? `<br><br><b>Already bet on a game that has started?</b> <button class="linkish" data-act="go-started" data-to="sec-started">Record it from the Started games list</button>.` : ""}</div></section>${scoreboard()}`;
   }
-  const open = bets.filter((b) => b.open), done = bets.filter((b) => !b.open);
+  // what is being played comes first: the picks in play, then the bets, with the settled ones out of the way
+  const G = liveGroups(bets), now = inPlayCard(bets);
+  const auto = G.inplay.length ? "inplay" : G.next.length ? "next" : "done";
+  const view = S.liveView === "all" || (S.liveView && (G[S.liveView] || []).length) ? S.liveView : auto;
+  const count = (k) => (k === "all" ? bets.length : G[k].length);
+  const tabs = `<div class="daytabs live-views" role="group" aria-label="Which bets to show">${[["inplay", "🔴", "In play"], ["next", "⏳", "Coming up"], ["done", "✅", "Finished"], ["all", "", "All"]]
+    .map(([k, em, l]) => `<button data-act="live-view" data-view="${k}" class="${view === k ? "on" : ""}" ${count(k) ? "" : "disabled"}>${em ? `<span class="em" aria-hidden="true">${em} </span>` : ""}${l}<span class="n">${count(k)}</span></button>`).join("")}</div>`;
+  const about = { inplay: "Bets with a pick being played right now, the ones closest to finishing first.",
+    next: "Bets still alive with nothing being played right now, the soonest game first.",
+    done: "Settled in the last day, and bets that can no longer win.",
+    all: "Every bet: in play first, then coming up, then finished." }[view];
+  const CAP = 6;
+  let list;
+  if (view === "all") {
+    const part = (title, bs) => (bs.length ? `<h3 class="bets-group">${title} <span class="muted">${bs.length}</span></h3>${bs.map(liveBet).join("")}` : "");
+    list = part("In play", G.inplay) + part("Coming up", G.next) + part("Finished", G.done);
+  } else {
+    const bs = G[view], full = S.liveMore[view] || bs.length <= CAP + 1;
+    list = (full ? bs : bs.slice(0, CAP)).map(liveBet).join("")
+      + (bs.length > CAP + 1 ? `<div class="more"><button class="btn small" data-act="bets-more" data-view="${view}">${full ? "Show fewer" : `Show all ${bs.length} bets`}</button></div>` : "");
+  }
   return `${head}${bar}
+    ${now}
     ${payoutCard()}
+    <div class="bets-sec" id="sec-bets">${tabs}<p class="views-about">${about} Open a bet to see every pick, check a cash-out or hedge it.</p>${list}</div>
+    <div class="banner"><span aria-hidden="true">ⓘ</span><span>Scores and stats are real. The <b>chance now</b> figures are rough estimates from the score, the clock and each player's pace: they do not know about foul trouble, injuries during the game or who has the ball. Use them as a guide, and check the final result on your sportsbook.</span></div>
     ${earningsCard()}
     ${needsCard(bets)}
-    ${exposure(open)}
-    <div class="banner"><span aria-hidden="true">ⓘ</span><span>Scores and stats are real. The <b>chance now</b> figures are rough estimates from the score, the clock and each player's pace: they do not know about foul trouble, injuries during the game or who has the ball. Use them as a guide, and check the final result on your sportsbook.</span></div>
-    ${open.map(liveBet).join("")}
-    ${done.length ? `<h2 class="sec-title">Finished in the last day</h2>${done.map(liveBet).join("")}` : ""}
     ${scoreboard()}`;
 }
 
@@ -2128,7 +2287,8 @@ function renderGuide() {
       <dt>Simulator vs book</dt><dd>How many percentage points more likely the simulator thinks the over (blue, right) or under (red, left) is than the sportsbook does. A lean, not a bet.</dd>
     </dl>
     <h3>During the games</h3>
-    <p>The <b>Live</b> page follows every bet you recorded, pick by pick, with real scores and stat lines. If your sportsbook offers a cash-out, type the amount in and the tool compares it with what the bet is worth right now:
+    <p>The <b>Live</b> page follows every bet you recorded, pick by pick, with real scores and stat lines. What is being played right now comes first: an <b>In play now</b> card with every pick in play, then the bets, with a switch between those in play, those coming up and those finished. A bet is folded to its picks in play until you open it. Each bet has a strip with a piece for every pick: green once it is in, red if it missed, part-filled while its game is on.
+      A pick in play has its own bar: the count so far on the knob and the line as a marker, or for a team pick how far ahead or behind it is against what it needs. If your sportsbook offers a cash-out, type the amount in and the tool compares it with what the bet is worth right now:
       what it would pay, times the chance the remaining picks win. It also counts the chance of ending up with nothing: holding is a gamble and the offer is sure money,
       so the verdict compares the offer with the sure amount that is as good as holding for your bankroll (with no bankroll set, it takes the bet's stake as 3% of one). The bigger the possible win next to your bankroll, the sooner cashing out makes sense, and the page tells you the amount at which it does.
       During a game the chance is the tool's rough live estimate, corrected by how those estimates have done on finished games so far.</p>
@@ -2148,7 +2308,7 @@ function renderGuide() {
       It works for spreads, totals and player props on games still to come. A game that has started cannot be priced at another line, only recorded at it.</p>
     <p><b>Lottery tickets.</b> On the Today page, under Parlays: tickets built for the size of the payout from a small stake. <b>Call every game</b> takes the likelier winner of every game. <b>Best shot at $1,000</b> (and the other sizes) is, of all the tickets that pay at least that much, the one most likely to hit. Each shows what your stake pays, the chance as “1 in N”, and what comes back on average, which is always less than the stake: the sportsbook's fee is taken once for every pick.</p>
     <p><b>Finding a game.</b> The search box at the top of the Today page stays in reach as you scroll: tap it for every game by day, or type a team (Packers, Green Bay, GB) or a player. Under Games, pick a day and tap a game to open it.</p>
-    <p><b>Slip coach.</b> When a slip overlaps bets you already have open, repeats a pick, takes the other side of one, or leans on one unlikely pick, the bet slip says so. On the Live page, <b>What you need</b> lists every pick your live bets depend on, with the money riding on each.</p>
+    <p><b>Slip coach.</b> When a slip overlaps bets you already have open, repeats a pick, takes the other side of one, or leans on one unlikely pick, the bet slip says so. On the Live page, <b>What you need next</b> goes through the games that have not started, the next one first, with every pick your bets need from it.</p>
     <p><b>"Or more" bets.</b> Under each player's line is a row of chips such as <b>3+ 68%</b>, <b>4+ 49%</b>: the bets on reaching a number, with the tool's chance for each. Press one to put it in the bet slip. 4+ receptions is the same bet as over 3.5, so it is priced the same way: anchored to that player's main line, and for the NBA to the sportsbook's own price for that number. <b>Touchdown scorers</b> are under the Anytime TD tab of an NFL game. The feed has no line or price for them, so that chance is the simulator's own estimate and the tool never rates or suggests it.
       The suggested picks and parlays use “or more” bets too: any the sportsbook prices (NBA), judged at that price like every other pick, and for a stat you have marked as having no over/under on your app, the “or more” bet that is the same bet as its over.</p>
     <p>The tool's lines come from ESPN's copy of DraftKings, which can run behind the app itself. If a player prop shows a different line in your app, type it in the slip and press <b>Use … everywhere</b>: every pick, suggested parlay and price on the dashboard is then worked out at your line, until the feed itself moves or the game starts. The dashboard also updates by itself whenever the feed moves a game line or a player prop, and a page left open picks that up within a minute.</p>
@@ -2823,6 +2983,23 @@ document.addEventListener("click", async (e) => {
     return;
   }
   if (act === "need-all") { S.needAll = !S.needAll; renderMain(); return; }
+  if (act === "live-view") {  // which bets the Live page lists; the list is brought back into view if it was scrolled past
+    S.liveView = a.dataset.view;
+    renderMain();
+    const el = $("#sec-bets");
+    if (el && el.getBoundingClientRect().top < 0) el.scrollIntoView({ block: "start" });
+    return;
+  }
+  if (act === "bets-more") { S.liveMore[a.dataset.view] = !S.liveMore[a.dataset.view]; renderMain(); return; }
+  if (act === "bet-toggle") {  // open or fold one bet, leaving the rest of the page where it is
+    const id = a.dataset.id, b = S.live && S.live.bets.find((x) => String(x.id) === id), el = document.getElementById(`bet-${id}`);
+    S.betOpen[id] = !S.betOpen[id];
+    if (!b || !el) { renderMain(); return; }
+    el.outerHTML = liveBet(b);
+    const card = document.getElementById(`bet-${id}`);
+    if (card && !S.betOpen[id] && card.getBoundingClientRect().top < 0) card.scrollIntoView({ block: "start" });
+    return;
+  }
   if (act === "lotto-open") { S.lottoOpen[a.dataset.id] = !S.lottoOpen[a.dataset.id]; const b = $("#lottoBody"); if (b) b.innerHTML = lottoBody(); return; }
   if (act === "rung-all") {
     S.rungAll[a.dataset.row] = !S.rungAll[a.dataset.row];

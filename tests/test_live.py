@@ -212,6 +212,54 @@ class BetAsItStands(unittest.TestCase):
         self.assertEqual((v["legs"][0]["status"], v["legs"][0]["decided"], v["status"]), ("won", True, "won"))
 
 
+class ProgressBars(unittest.TestCase):
+    """How far along each pick is, for the bars on the Live page."""
+
+    def _leg(self, l, g, box=None):
+        with mock.patch.object(live, "find_game", return_value=g),                 mock.patch.object(live, "boxscore", return_value=box or {"players": {}, "home_wp": None}):
+            return live.leg_view(l)
+
+    def test_an_over_fills_as_the_count_nears_what_it_needs(self):
+        l = leg("receptions", "over", 3.5, pkey="te", proj=4, sport="NFL")
+        g = game("in", period=3, clock=450)
+        v = self._leg(l, g, {"players": {"te": {"receptions": 2.0}}, "home_wp": None})
+        self.assertEqual((v["goal"], v["current"]), (4.0, 2.0))  # over 3.5 needs 4
+        self.assertAlmostEqual(v["complete"], 0.5)
+        self.assertAlmostEqual(v["played"], 0.625)                 # 7:30 left in the 3rd of a 60-minute game
+        yards = self._leg(leg("rec_yds", "over", 54.5, pkey="te", proj=50, sport="NFL"), g, {"players": {"te": {"rec_yds": 109.0}}, "home_wp": None})
+        self.assertEqual((yards["goal"], yards["complete"], yards["decided"]), (54.5, 1.0, False))  # past the line, full, not yet final
+
+    def test_an_under_and_a_side_are_as_complete_as_the_game(self):
+        g = game("in", period=3, clock=360, home=70, away=60)  # 30 of 48 minutes played
+        box = {"players": {"x": {"pts": 12.0}}, "home_wp": 0.7}
+        under = self._leg(leg("pts", "under", 24.5, pkey="x", proj=24), g, box)
+        self.assertEqual(under["goal"], 24.0)  # under 24.5: 24 at most
+        for v in (under, self._leg(leg("ml", "home"), g, box), self._leg(leg("spread", "home", -3.5), g, box), self._leg(leg("total", "under", 230.5), g, box)):
+            self.assertAlmostEqual(v["complete"], 30 / 48, msg=v["selection"])
+        self.assertIsNone(self._leg(leg("ml", "home"), g, box)["goal"])
+        self.assertEqual(self._leg(leg("total", "over", 230.0), g, box)["goal"], 231.0)   # a whole-number line: landing on it only pushes
+        self.assertEqual(self._leg(leg("total", "under", 230.0), g, box)["goal"], 229.0)
+
+    def test_nothing_before_the_start_and_full_once_decided(self):
+        l = leg("reb", "over", 9.5, pkey="big", proj=10)
+        self.assertEqual(self._leg(l, game("pre"))["complete"], 0.0)
+        won = self._leg(l, game("in", period=2, clock=100), {"players": {"big": {"reb": 11.0}}, "home_wp": None})
+        self.assertEqual((won["status"], won["complete"]), ("won", 1.0))
+        lost = self._leg(leg("pts", "over", 24.5, pkey="x", proj=24), game("post"), {"players": {"x": {"pts": 12.0}}, "home_wp": None})
+        self.assertEqual((lost["status"], lost["complete"]), ("lost", 1.0))
+
+    def test_a_player_not_yet_in_the_box_score_has_made_no_progress(self):
+        v = self._leg(leg("pts", "over", 22.5, pkey="absent", proj=24), game("in", period=3, clock=400), {"players": {"other": {"pts": 15.0}}, "home_wp": 0.6})
+        self.assertEqual((v["current"], v["complete"]), (None, 0.0))
+
+    def test_touchdowns_count_towards_the_number_needed(self):
+        two = leg("anytime_td", "yes", 1.5, p=0.2, pkey="rb", sport="NFL")
+        v = self._leg(two, game("in", period=2, clock=300), {"players": {"rb": {"anytime_td": 1.0}}, "home_wp": None})
+        self.assertEqual((v["goal"], v["complete"], v["decided"]), (2.0, 0.5, False))
+        one = self._leg(leg("anytime_td", "yes", 0.5, p=0.4, pkey="rb", sport="NFL"), game("in", period=2, clock=300), {"players": {"rb": {"anytime_td": 0.0}}, "home_wp": None})
+        self.assertEqual((one["goal"], one["complete"]), (1.0, 0.0))
+
+
 class AtALiveLine(unittest.TestCase):
     def test_a_pick_judged_at_its_own_line_is_unchanged(self):
         g = game("in", period=2, clock=300, home=60, away=50)

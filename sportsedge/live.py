@@ -729,8 +729,44 @@ def _need_text(leg: dict, value: float, g: dict) -> str:
     return f"already over by {n(-gap)}" if gap < 0 else f"can allow {n(math.ceil(gap) - 1 if whole else gap)} more"
 
 
+def tracker(v: dict) -> dict:
+    """How far along a pick is, for the Live page's progress bars: {goal, complete}.
+
+    goal: the number an over has to reach, or the most an under can finish on. A stat that moves in ones is
+    given in whole numbers, so a line of 3.5 is 4 for an over and 3 for an under. None for a pick to win or
+    against a spread, which have no count to reach.
+    complete: 0 to 1. An over is as complete as its count is to the goal. An under, a spread and a pick to win
+    cannot come in early (they hold or they do not, until the end), so they are as complete as the game is.
+    A pick that is decided is complete; one whose game has not started is at 0."""
+    mk, side, line = v["market_key"], v["side"], v.get("line")
+    goal = None
+    if mk == "anytime_td":
+        goal = float(max(int(math.ceil(line if line is not None else 0.5)), 1))
+    elif mk not in ("ml", "spread") and line is not None:
+        whole = mk in COUNTS or mk == "total"
+        if side == "under":
+            goal = float(math.ceil(line) - 1) if whole else float(line)
+        else:
+            goal = float(math.floor(line) + 1) if whole else float(line)
+    if v.get("decided"):
+        done = 1.0
+    elif v.get("state") != "in":
+        done = 0.0
+    elif goal and side != "under":
+        done = 0.0 if v.get("current") is None else min(max(float(v["current"]) / goal, 0.0), 1.0)
+    else:
+        done = float(v.get("played") or 0.0)
+    return {"goal": goal, "complete": float(min(max(done, 0.0), 1.0))}
+
+
 def leg_view(leg: dict, sd: dict | None = None, fresh: dict | None = None) -> dict:
     """Where one leg stands. fresh: the same leg from the current slate, if it is still listed (pre-game)."""
+    out = _leg_view(leg, sd, fresh)
+    out.update(tracker(out))
+    return out
+
+
+def _leg_view(leg: dict, sd: dict | None = None, fresh: dict | None = None) -> dict:
     sport = str(leg["sport"]).lower()
     mk, side = leg["market_key"], leg["side"]
     is_prop = mk not in ("ml", "spread", "total")
@@ -754,7 +790,7 @@ def leg_view(leg: dict, sd: dict | None = None, fresh: dict | None = None) -> di
            "game": f"{leg.get('away')} @ {leg.get('home')}", "market_key": mk, "side": side, "line": line,
            "dec": float(leg.get("dec") or 0) or None, "is_prop": is_prop, "p_pre": p_pre, "p_now": p_pre, "p_push": 0.0,
            "state": "unknown", "detail": "", "score": "", "current": None, "need": "", "status": "pre", "decided": False,
-           "progress": None, "start": leg.get("start")}
+           "progress": None, "played": 0.0, "start": leg.get("start")}
     g = find_game(sport, leg)
     if g is None:
         out["detail"] = "game not found in the live feed"
@@ -764,6 +800,7 @@ def leg_view(leg: dict, sd: dict | None = None, fresh: dict | None = None) -> di
     if g["state"] == "pre":
         return out
     f = remaining_fraction(sport, g)
+    out["played"] = float(min(max(1.0 - f, 0.0), 1.0))  # the share of the game played so far
     box = boxscore(sport, g["event_id"])
     if is_prop:
         row = box["players"].get(str(leg.get("player_key")))
