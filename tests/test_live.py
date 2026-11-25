@@ -174,6 +174,20 @@ class BetAsItStands(unittest.TestCase):
         self.assertIn("not in the box score", x["need"])
         self.assertAlmostEqual(x["p_now"], 0.5)  # his chance stays where it was, rather than falling as if he had scored nothing
 
+    def test_a_bet_recorded_at_another_line_is_judged_at_that_line(self):
+        # the tool had the home side -10.5 at an even chance; the bet was made live at -29.5
+        mine = {**leg("spread", "home", -29.5, p=0.5), "ref_line": -10.5}
+        own = leg("spread", "home", -10.5, p=0.5)
+        g = game("in", period=3, clock=400, home=88, away=65)  # up 23 with a third of the game left
+        a = self._view([mine], {mine["key"]: g}, {"players": {}, "home_wp": None})["legs"][0]
+        b = self._view([own], {own["key"]: g}, {"players": {}, "home_wp": None})["legs"][0]
+        self.assertLess(a["p_pre"], 0.15)          # laying 29.5 was a long shot before the game, not an even bet
+        self.assertLess(a["p_now"], b["p_now"])    # and is still harder than laying 10.5
+        self.assertGreater(b["p_now"], 0.9)
+        over = {**leg("pts", "over", 30.5, p=0.5, pkey="a", proj=25), "ref_line": 24.5}
+        v = self._view([over], {over["key"]: game("in", period=2, clock=360)}, {"players": {"a": {"pts": 12.0}}, "home_wp": None})["legs"][0]
+        self.assertLess(v["p_pre"], 0.35)
+
     def test_an_over_already_reached_is_decided_before_the_final_whistle(self):
         l = leg("reb", "over", 9.5, pkey="big", proj=10)
         v = self._view([l], {l["key"]: game("in", period=2, clock=100)}, {"players": {"big": {"reb": 11.0}}, "home_wp": None})

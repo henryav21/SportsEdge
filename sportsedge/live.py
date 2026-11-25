@@ -575,7 +575,21 @@ def leg_view(leg: dict, sd: dict | None = None, fresh: dict | None = None) -> di
     mk, side = leg["market_key"], leg["side"]
     is_prop = mk not in ("ml", "spread", "total")
     line = None if leg.get("line") is None or pd.isna(leg.get("line")) else float(leg["line"])
-    p_pre = float((fresh or {}).get("p_cond") or leg.get("p_cond") or 1.0 / float(leg.get("dec") or 2.0))
+    p_ref = float((fresh or {}).get("p_cond") or leg.get("p_cond") or 1.0 / float(leg.get("dec") or 2.0))
+    # The line that chance belongs to: the tool's line now if the pick is still listed, otherwise the tool's
+    # line when the bet was recorded. If the bet was made at another line, the pre-game expectation is read
+    # from the tool's line and the chance is then worked out at the bet's own.
+    ref = (fresh or {}).get("line") if fresh else leg.get("ref_line")
+    ref = None if ref is None or pd.isna(ref) or line is None or abs(float(ref) - line) < 1e-9 else float(ref)
+    base = {**leg, "p_cond": p_ref} if ref is None else {**leg, "p_cond": p_ref, "line": ref}
+    at = None if ref is None else line
+    if ref is None:
+        p_pre = p_ref
+    elif is_prop:
+        p_pre = prop_leg_chance(base, 0.0, 1.0, at=at)[0]
+    else:
+        before = {"state": "pre", "home_score": 0.0, "away_score": 0.0, "period": 0, "clock": 0.0}
+        p_pre = game_leg_chance(sport, base, before, None, sd, at=at)[0]
     out = {"key": leg.get("key"), "selection": leg.get("selection") or leg.get("key"), "sport": sport.upper(),
            "game": f"{leg.get('away')} @ {leg.get('home')}", "market_key": mk, "side": side, "line": line,
            "dec": float(leg.get("dec") or 0) or None, "is_prop": is_prop, "p_pre": p_pre, "p_now": p_pre, "p_push": 0.0,
@@ -606,7 +620,7 @@ def leg_view(leg: dict, sd: dict | None = None, fresh: dict | None = None) -> di
             return out
         value = float((row or {}).get(mk, 0.0))  # in the game but nothing recorded in this stat yet
         out["current"] = value
-        p_win, p_push = prop_leg_chance({**leg, "p_cond": p_pre}, value, f)
+        p_win, p_push = prop_leg_chance(base, value, f, at=at)
         if g["state"] == "post":
             out.update(status=settle_prop(side, line, value), decided=True)
         elif mk in COUNTS and line is not None and value > line:
@@ -618,7 +632,7 @@ def leg_view(leg: dict, sd: dict | None = None, fresh: dict | None = None) -> di
     else:
         margin, total = g["home_score"] - g["away_score"], g["home_score"] + g["away_score"]
         out["current"] = total if mk == "total" else (margin if side == "home" else -margin)
-        p_win, p_push = game_leg_chance(sport, {**leg, "p_cond": p_pre}, g, box.get("home_wp"), sd, box.get("home_wp0"))
+        p_win, p_push = game_leg_chance(sport, base, g, box.get("home_wp"), sd, box.get("home_wp0"), at=at)
         if g["state"] == "post":
             out.update(status=settle_game(mk, side, line, margin, total)[0], decided=True)
         elif mk == "total" and line is not None and total > line:

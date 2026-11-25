@@ -111,6 +111,13 @@ that way of writing prices.
   are converted where a price is shown and where one is typed.
 - **Selling early** is the same question as a cash-out: type what you would get for selling into the
   cash-out box on the Live page.
+- **A trade slip's percent is the price.** DraftKings' trade slip (the app in states without its
+  sportsbook) writes a contract's price as a percent: 52% there is 52¢ here. The tool keeps ¢ for prices so
+  they are not mistaken for its own win chances.
+- **Type the payout when you can.** A trade slip shows what your spend pays (for example $10 to pay $18).
+  The bet slip has a box for it in cents mode. Spend over payout is the real cost of a contract with the
+  fee already in it, so the price box and the fee setting are then not used. Without a payout, only whole
+  contracts are bought, as on the app, so a few cents of the spend can be left over.
 
 ## Pasting a bet slip
 
@@ -120,7 +127,16 @@ My Bets). It finds the picks, the odds and the stake and fills the bet slip in, 
   24.5. Spreads, totals and moneylines are matched by team nickname.
 - A line that differs from the tool's is kept as **your line** and recorded as such.
 - Anything that cannot be matched to a pick the tool has (a stat it does not carry, a first-basket bet) is
-  listed as not matched. Nothing is guessed. A screenshot cannot be read, only text.
+  listed as not matched. Nothing is guessed.
+- **A trade slip** is understood too: the percent under a pick is its price, and "Payout: $18" what its
+  stake pays. When every pick has its own payout they are separate single bets, and one button records
+  them all, each at the odds its payout works out to. The account balance and the +$5 / +$10 buttons are
+  not mistaken for stakes.
+- **From a screenshot:** the tool reads text, not pictures, but a phone can pull the text out. Open the
+  screenshot, choose *Copy text* (Google Lens on Android, Live Text on iPhone), and paste.
+- **A bet made at a line other than the tool's** (an alternate line, or a live one) is recorded at your
+  line. The tool's line is kept beside it, because the stored win chance belongs to that line: the Live
+  page reads the pre-game expectation from the tool's line and works the chance out at yours.
 
 ## Betting during a game
 

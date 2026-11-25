@@ -86,6 +86,73 @@ class SpreadOverSeveralLines(unittest.TestCase):
         self.assertEqual(keys(out), ["NFL|N1|rush_yds|under|saquon barkley", "NFL|N1|spread|home|", "NFL|N1|total|over|"])
 
 
+TRADE_SLIP = """Home Sports Predictions Rivals Pick'Em
+Trending
+2 Trade Slip
+$0.13
+Clear All
+Combo Singles
+Live BOS Celtics -29.5
+52%
+Spread
+BOS Celtics @ WAS Wizards
+$ 10
+View Rules
+Payout: $18
+Trade Details
++$5 +$10 +$20
+DAL Mavericks +7.5
+50%
+Spread
+DAL Mavericks @ DEN Nuggets • Today 9:10 PM
+$ 10
+View Rules
+Payout: $19
+Trade Details
++$5 +$10 +$20
+Some of your selections cannot be combined
+View All Rewards
+Stake All
+$ 10
+Make a Deposit"""
+
+
+class TradeSlip(unittest.TestCase):
+    """A trading app's slip: the price is a percent, and each pick shows what its own stake pays."""
+
+    def test_a_payout_under_every_pick_means_separate_single_bets(self):
+        out = slipread.read(TRADE_SLIP, LEGS)
+        self.assertEqual(keys(out), ["NBA|G1|spread|away|", "NBA|G2|spread|away|"])
+        a, b = out["singles"]
+        self.assertEqual((a["line"], a["stake"], a["payout"], a["price"]), (-29.5, 10.0, 18.0, 52.0))  # the tool had BOS -10.5
+        self.assertAlmostEqual(a["odds"], -125.0)  # $10 to pay $18: the fee is already in that
+        self.assertEqual((b["line"], b["stake"], b["payout"], b["price"]), (7.5, 10.0, 19.0, 50.0))  # the tool had DAL +8.5
+        self.assertAlmostEqual(b["odds"], -100 / 0.9, places=4)
+        self.assertEqual(out["unmatched"], [])
+
+    def test_the_balance_and_the_quick_add_buttons_are_not_stakes(self):
+        out = slipread.read(TRADE_SLIP, LEGS)
+        self.assertEqual(out["stake"], 10.0)  # not the $0.13 balance, not "+$5"
+        self.assertTrue(all(s["stake"] == 10.0 for s in out["singles"]))
+
+    def test_one_pick_is_simply_the_bet(self):
+        out = slipread.read("Trade Slip\nDAL Mavericks +7.5\n50%\nSpread\nDAL Mavericks @ DEN Nuggets\n$ 20\nPayout: $38", LEGS)
+        self.assertEqual(out["singles"], [])
+        self.assertEqual((out["stake"], out["payout"], out["price"]), (20.0, 38.0, 50.0))
+        self.assertAlmostEqual(out["odds"], -100 / 0.9, places=4)
+
+    def test_a_combo_has_one_payout_for_the_lot(self):
+        out = slipread.read("Combo\nBOS Celtics -10.5\nSpread\nDEN Nuggets -8.5\nSpread\nStake\n$ 10\nPayout: $36", LEGS)
+        self.assertEqual(keys(out), ["NBA|G1|spread|away|", "NBA|G2|spread|home|"])
+        self.assertEqual(out["singles"], [])
+        self.assertAlmostEqual(out["odds"], 260.0)  # $10 to pay $36
+        self.assertEqual(out["payout"], 36.0)
+
+    def test_a_price_alone_gives_the_odds_before_any_fee(self):
+        out = slipread.read("DEN Nuggets -8.5\n40%", LEGS)
+        self.assertAlmostEqual(out["odds"], 150.0)  # 40 cents pays a dollar
+
+
 class WhatCannotBeRead(unittest.TestCase):
     def test_a_stat_the_tool_has_no_line_for_is_handed_back(self):
         out = slipread.read("Jayson Tatum Over 1.5 Steals\nJayson Tatum Over 25.5 Points", LEGS)

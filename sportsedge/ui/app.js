@@ -26,7 +26,7 @@ const S = {
   odds: null, oddsAt: 0, movesGame: null, plays: null, gparOpen: {},
   started: [], st: {}, slipLines: {}, boxOpen: {},
   board: null, hedgeOdds: {},   // live prices for games in play; the odds typed into each hedge box
-  importOpen: false, importText: "", importNote: null,   // paste a slip from the sportsbook   // games that have started; per game: chosen stat, "show all"; lines typed in the slip
+  importOpen: false, importText: "", importNote: null, importSingles: null, slipPayout: "",   // paste a slip from the sportsbook   // games that have started; per game: chosen stat, "show all"; lines typed in the slip
   live: null, liveErr: null, liveFirst: {}, offers: JSON.parse(localStorage.getItem("offers") || "{}"), cash: {},
   priceErrors: [],
   pb: { tab: "", game: "", stat: "", q: "", limit: 40 }, // prop board
@@ -245,11 +245,25 @@ function importBox() {
   return `<div class="imp"><label for="impText">Paste your bet slip</label>
     <textarea id="impText" placeholder="Copy the bet from your sportsbook (the slip, or My Bets) and paste the text here.">${esc(S.importText)}</textarea>
     <div class="row"><button class="btn primary small" data-act="import-read">Read it</button><button class="btn small ghost" data-act="import-toggle">Cancel</button></div>
-    <div class="hint">Text only: a screenshot cannot be read. Nothing is recorded until you check the picks and press <i>Record bet</i>.</div></div>`;
+    <div class="hint">Text only. From a screenshot, let your phone pull the text out first: open the picture, choose <i>Copy text</i> (Google Lens on Android, Live Text on iPhone), then paste here.
+      Nothing is recorded until you check the picks and confirm.</div></div>`;
+}
+/* A pasted trade slip with a payout under every pick: those are separate single bets. */
+function importSingles() {
+  const list = S.importSingles;
+  if (!list || list.length < 2) return "";
+  const ready = list.every((x) => x.odds != null && x.stake > 0);
+  const name = (x) => { const l = S.legs[x.key]; return x.line == null || !l ? esc(x.selection) : `${esc(x.selection)} <span class="muted">→ at your line ${["spread"].includes(l.market_key) ? signed(x.line, Math.abs(x.line) % 1 ? 1 : 0) : lineNum(x.line)}</span>`; };
+  return `<div class="imp-note singles"><b>These look like ${list.length} separate single bets,</b> each with its own stake and payout.
+    <ul>${list.map((x) => `<li>${name(x)}<br><span class="muted">${x.stake != null ? `${money(x.stake, 2)} to pay ${money(x.payout, 2)}` : "no stake found"}${x.odds != null && x.stake ? ` · ${fmtCents((100 * x.stake) / x.payout)} a contract with the fee in` : ""}${x.price != null ? ` · shown as ${lineNum(x.price)}%` : ""}</span></li>`).join("")}</ul>
+    <div class="row">${ready ? `<button class="btn primary small" data-act="import-singles-record">Record ${list.length} separate bets</button>` : ""}
+      <button class="btn small ghost" data-act="import-singles-combo">They are one combo</button></div>
+    ${ready ? "" : `<div style="margin-top:4px">A stake or payout is missing for one of them: record them one at a time from the slip below.</div>`}</div>`;
 }
 function importNote() {
   const n = S.importNote;
   if (!n) return "";
+  if (S.importSingles && S.importSingles.length > 1) return importSingles();
   const miss = (n.unmatched || []).map((u) => `<li>“${esc(u.text)}” <span class="muted">${esc(u.why)}</span></li>`).join("");
   const head = n.n ? `<b>Read ${n.n} pick${n.n === 1 ? "" : "s"} from your slip${n.odds != null ? `, odds ${fmtOdds(n.odds)}` : ""}${n.stake != null ? `, stake ${money(n.stake, 2)}` : ""}.</b> Check each one, and its line, before recording.`
     : `<b>No picks could be read from that text.</b> It needs the player or team, over or under, and the number, for a game the tool has.`;
@@ -1706,7 +1720,9 @@ function renderGuide() {
       what it would pay, times the chance the remaining picks win. Sportsbooks usually offer less than that. Cashing out can still make sense when the possible win is large next to your bankroll, and the page tells you the amount at which it does.</p>
     <h3>Trading apps (prices in cents)</h3>
     <p>A trading app sells a contract that pays $1 if you are right, for a price in cents, and charges a fee. Switch the tool to <b>cents per contract</b> above (or with the −110 / 52¢ switch at the top) and set the fee.
-      A price in cents is a chance: a 62¢ contract is worth buying only if the pick wins more than 62% of the time, fee included. So each pick shows <b>worth up to</b>: the most it is worth paying on your app.
+      Some apps, DraftKings' trade slip among them, write that price as a percent: 52% there is 52¢ here. The tool keeps ¢ for prices so they are not mistaken for its own win chances.
+      A price in cents is a chance: a 62¢ contract is worth buying only if the pick wins more than 62% of the time, fee included.
+      A trade slip also shows the <b>payout</b> for your spend. Type that into the bet slip when you can: it already has the fee in it, so it is the most exact. So each pick shows <b>worth up to</b>: the most it is worth paying on your app.
       The tool's own prices still come from a sportsbook's lines, shown in cents for comparison. Your app's price and line can differ, so type yours into the bet slip.</p>
     <p>Selling before the game ends is the same question as a cash-out: on the Live page, type what you would get for selling into the cash-out box. The hedge box takes a price in cents too.</p>
     <h3>Betting during a game</h3>
@@ -2028,8 +2044,10 @@ function renderSlip() {
       ${E.same_game ? `<div class="hint">These picks are from the same game and win together ×${num(E.lift, 2)} as often as unrelated picks would. Your sportsbook prices same-game parlays itself, so type in the odds it offers.</div>` : ""}
       <div class="row"><label>${inCents() ? "Price on your app, in cents" : "Odds on your sportsbook's slip"}<input type="number" step="${inCents() ? "0.1" : "1"}" id="slipOdds" value="${S.slipOdds ?? ""}" aria-describedby="slipOddsHelp"></label>
         <label>${inCents() ? "Spend $" : "Stake $"}<input type="number" min="0" step="1" id="slipStake" value="${S.slipStake ?? ""}" placeholder="0"></label></div>
+      ${inCents() ? `<div class="row one"><label>Payout your trade slip shows for that spend $<input type="number" min="0" step="1" id="slipPayout" value="${esc(S.slipPayout ?? "")}" placeholder="optional"></label></div>` : ""}
       <div class="hint" id="slipOddsHelp">${inCents()
-        ? `Type the price your app is asking for ${legs.length > 1 ? "this combination" : "this contract"}, in cents (for example 42 for 42¢). The box starts at ${fmtOdds(E.odds)}, what a sportsbook's odds for ${legs.length > 1 ? "these picks" : "it"} work out to. The fee (${feeText()}) is added for you. <button class="linkish" data-act="guide">Change the fee</button>`
+        ? `Type the price your app shows for ${legs.length > 1 ? "this combination" : "this contract"}: the percent on a trade slip, or cents (52 for 52% or 52¢). The box starts at ${fmtOdds(E.odds)}, what a sportsbook's odds for ${legs.length > 1 ? "these picks" : "it"} work out to.
+          <b>Better still, type the payout</b> your slip shows for your spend: that already has the fee in it, so the price box and the fee setting (${feeText()}) are then not used. <button class="linkish" data-act="guide">Fee setting</button>`
         : legs.length > 1
           ? `Build this same parlay at your sportsbook and copy the odds it shows for the whole bet (for example +575). The box starts at ${fmtOdds(E.odds)}, the standard price worked out from the ${legs.length} picks' own odds.`
           : `Copy the odds your sportsbook shows for this pick right now. The box starts at the odds the tool has.`} Also check that each line above matches your ${inCents() ? "app" : "sportsbook"}: the result is only as good as the lines.</div>
@@ -2042,36 +2060,53 @@ function renderSlip() {
   updateSlipCalc();
 }
 
+const americanOfDec = (d) => (d >= 2 ? (d - 1) * 100 : -100 / (d - 1));
+/* The price the slip is judged at. A trade slip shows what your stake pays: when that is typed it is used as it
+   stands, because it already holds the fee. Otherwise the price box is used, and in cents only whole contracts
+   are bought, so a few cents of the spend can be left over. null when nothing usable is typed. */
+function slipPrice() {
+  const stake = parseFloat(S.slipStake), pay = parseFloat(S.slipPayout);
+  if (inCents() && pay > 0 && stake > 0 && pay > stake) {
+    return { from: "payout", dec: pay / stake, odds: americanOfDec(pay / stake), cost: (100 * stake) / pay, spent: stake, payout: pay };
+  }
+  const odds = typedOdds(S.slipOdds);
+  if (isNaN(odds)) return null;
+  if (!inCents()) return { from: "odds", dec: decOf(odds), odds, cost: null, spent: stake, payout: stake > 0 ? stake * decOf(odds) : null };
+  const typed = parseFloat(S.slipOdds), cost = typed + feeOf(typed);
+  const n = stake > 0 ? Math.floor(stake / (cost / 100) + 1e-9) : null;
+  return { from: "price", dec: 100 / cost, odds, cost, contracts: n, spent: n == null ? null : (n * cost) / 100, payout: n };
+}
+
 function updateSlipCalc() {
   const box = $("#slipCalc");
   const E = S.slipEval;
   if (!box || !E) return;
-  const odds = typedOdds(S.slipOdds);
-  if (isNaN(odds)) {
-    box.innerHTML = `<div class="hint">${inCents() ? "Enter the price in cents: a number between 1 and 99 (for example 42 for 42¢)." : "Enter American odds: a number of 100 or more, with a minus sign for favourites (for example -110, or 250 for +250)."}</div>`;
+  const sp = slipPrice();
+  if (!sp) {
+    box.innerHTML = `<div class="hint">${inCents() ? "Enter the price in cents (a number between 1 and 99, for example 52 for 52¢ or 52%), or the payout your trade slip shows for your spend." : "Enter American odds: a number of 100 or more, with a minus sign for favourites (for example -110, or 250 for +250)."}</div>`;
     return;
   }
-  const dec = decOf(odds);
-  const typed = parseFloat(S.slipOdds), cost = inCents() ? typed + feeOf(typed) : null;  // what one contract costs, fee included
-  const pw = E.p_win_all, ph = E.p_hit;
+  const dec = sp.dec, pw = E.p_win_all, ph = E.p_hit;
   const ev = pw * dec + (ph - pw) - 1;
   const st = settings();
   const b = dec - 1;
   const f = Math.max(0, Math.min(((b * pw - (1 - ph)) / b) * st.kelly_fraction, st.kelly_cap));
   const stake = parseFloat(S.slipStake);
+  let html = "";
+  if (sp.from === "payout") html += `<div class="kv" title="Your spend divided by the payout: the fee is already in it"><span class="k">That works out to, per contract</span><span class="v">${fmtCents(sp.cost)}</span></div>`;
+  if (sp.from === "price") html += `<div class="kv" title="The price you typed plus the fee"><span class="k">Cost of one contract, fee included</span><span class="v">${fmtCents(sp.cost)}${sp.contracts != null ? ` <span class="muted" style="font-weight:400">· ${money(sp.spent, 2)} buys ${sp.contracts}</span>` : ""}</span></div>`;
+  if (sp.payout != null && stake > 0) html += `<div class="kv"><span class="k">Pays if it wins</span><span class="v">${money(sp.payout, 2)}</span></div>`;
   // a bet on a game that has started, or at a line other than the tool's: the chance above is not for this bet
   const legs = S.slip.map((k) => S.legs[k]).filter(Boolean);
   const offLine = legs.some((l) => l.started || (S.slipLines[l.key] != null && l.line != null && Math.abs(parseFloat(S.slipLines[l.key]) - l.line) > 1e-9));
   if (offLine) {
-    box.innerHTML = `${stake > 0 ? `<div class="kv"><span class="k">Pays if it wins</span><span class="v">${money(stake * dec, 2)}</span></div>` : ""}
-      <div class="hint">No verdict for this one: it has a game that has started or a line different from the tool's, so the chance shown above is not the chance of this exact bet. It can still be recorded and followed.</div>`;
+    box.innerHTML = `${html}<div class="hint">No verdict for this one: it has a game that has started or a line different from the tool's, so the chance shown above is not the chance of this exact bet. It can still be recorded and followed.</div>`;
     return;
   }
-  let html = cost == null ? "" : `<div class="kv" title="The price you typed plus the fee"><span class="k">Cost of one contract, fee included</span><span class="v">${fmtCents(cost)}${stake > 0 ? ` <span class="muted" style="font-weight:400">· ${money(stake, 2)} buys ${(Math.round((stake / (cost / 100)) * 10) / 10).toLocaleString()}</span>` : ""}</span></div>`;
-  html += `<div class="kv"><span class="k">Expected return at ${inCents() ? "this price" : "these odds"}</span><span class="v ${cls(ev)}">${spct(ev)}${stake > 0 ? ` (${money(ev * stake, 2)})` : ""}</span></div>`;
-  if (stake > 0) html += `<div class="kv"><span class="k">Pays if it wins</span><span class="v">${money(stake * dec, 2)}</span></div>`;
+  html += `<div class="kv"><span class="k">Expected return at ${inCents() ? "this price" : "these odds"}</span><span class="v ${cls(ev)}">${spct(ev)}${stake > 0 ? ` (${money(ev * (sp.spent || stake), 2)})` : ""}</span></div>`;
+  if (sp.from === "price" && sp.contracts === 0) html += `<div class="hint">That spend does not buy one contract at this price.</div>`;
   if (f > 0) html += `<div class="hint verdict good">${ev < 0.02 ? `A small edge at ${inCents() ? "this price" : "these odds"}: worth it only if every line and price still matches your ${inCents() ? "app" : "sportsbook"}.` : `Worth a bet at ${inCents() ? "this price" : "these odds"}.`} ${S.bankroll ? `Suggested stake for your $${S.bankroll.toLocaleString()} bankroll: <button data-act="use-stake" data-v="${(S.bankroll * f).toFixed(2)}">${money(S.bankroll * f, 2)}</button>` : `Suggested stake: ${pct(f)} of your bankroll (set your bankroll at the top to see dollars).`}</div>`;
-  else html += `<div class="hint verdict bad">${inCents() ? `Not worth it at this price: this bet loses money on average. It needs a price below ${fmtCents(worthUpTo(pw))}, before the fee.` : `Not worth it at these odds: this bet loses money on average. It needs better than ${fmtOdds(E.fair_odds)}.`}</div>`;
+  else html += `<div class="hint verdict bad">${inCents() ? `Not worth it at this price: this bet loses money on average. A contract is worth at most ${fmtCents(100 * pw)} with the fee in.` : `Not worth it at these odds: this bet loses money on average. It needs better than ${fmtOdds(E.fair_odds)}.`}</div>`;
   box.innerHTML = html;
 }
 
@@ -2171,16 +2206,36 @@ document.addEventListener("click", async (e) => {
         for (const x of picks) if (x.line != null) S.slipLines[x.key] = x.line;
         S.keepOdds = res.odds;  // the odds on the slip, not the standard price (shown in cents if that is the setting)
         if (res.stake != null) S.slipStake = res.stake;
+        S.slipPayout = res.payout != null ? res.payout : "";
+        // a trade slip with a payout under every pick is several separate bets, not one
+        S.importSingles = (res.singles || []).filter((x) => S.legs[x.key]).length > 1 ? res.singles.filter((x) => S.legs[x.key]) : null;
         S.importOpen = false; S.importText = "";
         saveSlip(); await evalSlip();
-      } else S.importText = text;
+      } else { S.importText = text; S.importSingles = null; }
       S.importNote = { n: picks.length, odds: res.odds, stake: res.stake, unmatched: res.unmatched };
       if (window.innerWidth <= 1100) $("#slip").classList.add("open");
       renderSlip(); renderMain();
     } catch (err) { toast(String(err.message || err)); a.disabled = false; }
     return;
   }
-  if (act === "clear-slip") { S.slipLines = {}; S.importNote = null; S.slip = []; saveSlip(); S.slipEval = null; renderSlip(); $$('[data-act="toggle"].on').forEach((b) => { b.classList.remove("on"); if (b.classList.contains("add")) b.textContent = "+"; }); return; }
+  if (act === "import-singles-record") {
+    const list = (S.importSingles || []).filter((x) => S.legs[x.key] && x.odds != null && x.stake > 0);
+    if (!list.length) return;
+    a.disabled = true;
+    let done = 0;
+    try {
+      for (const x of list) {
+        await api("/api/bets", { method: "POST", body: JSON.stringify({ keys: [x.key], odds: x.odds, stake: x.stake, lines: x.line != null ? { [x.key]: x.line } : {} }) });
+        done += 1;
+      }
+      toast(`Recorded ${done} separate bets. Follow them on the Live page.`);
+    } catch (err) { toast(`${done} recorded, then: ${String(err.message || err)}`); }
+    S.importSingles = null; S.importNote = null; S.slip = []; S.slipLines = {}; S.slipEval = null; S.slipPayout = ""; S.live = null; S.odds = null; S.track = null;
+    saveSlip(); renderSlip(); renderMain();
+    return;
+  }
+  if (act === "import-singles-combo") { S.importSingles = null; renderSlip(); return; }
+  if (act === "clear-slip") { S.slipLines = {}; S.importNote = null; S.importSingles = null; S.slipPayout = ""; S.slip = []; saveSlip(); S.slipEval = null; renderSlip(); $$('[data-act="toggle"].on').forEach((b) => { b.classList.remove("on"); if (b.classList.contains("add")) b.textContent = "+"; }); return; }
   if (act === "ptab") { S.parlayTab = a.dataset.tab; renderMain(); return; }
   if (act === "ltab") { S.likelyTab = a.dataset.tab; renderMain(); return; }
   if (act === "pb-tab") { S.pb.tab = a.dataset.tab; S.pb.limit = 40; renderMain(); return; }
@@ -2218,15 +2273,17 @@ document.addEventListener("click", async (e) => {
     S.track = null; renderMain(); return;
   }
   if (act === "record-bet") {
-    const odds = typedOdds(S.slipOdds), stake = parseFloat(S.slipStake);
-    if (isNaN(odds) || !(stake > 0)) { toast(inCents() ? "Enter the price in cents and how much you spent first" : "Enter the odds and a stake first"); return; }
+    const sp = slipPrice();
+    if (!sp || !(parseFloat(S.slipStake) > 0)) { toast(inCents() ? "Enter what you spent, and the price or the payout, first" : "Enter the odds and a stake first"); return; }
+    if (sp.from === "price" && !sp.contracts) { toast("That spend does not buy one contract at this price"); return; }
+    const odds = sp.odds, stake = sp.spent;  // in cents only whole contracts are bought, so what was spent can be a little under what was typed
     try {
       const lines = {};
       for (const k of S.slip) { const v = parseFloat(S.slipLines[k]), l = S.legs[k]; if (l && !isNaN(v) && l.line != null && Math.abs(v - l.line) > 1e-9) lines[k] = v; }
       await api("/api/bets", { method: "POST", body: JSON.stringify({ keys: S.slip, odds, stake, lines }) });
       toast("Recorded. Follow it on the Live page.");
       S.live = null; S.odds = null;
-      S.slip = []; saveSlip(); S.slipEval = null; S.slipStake = null; S.track = null; S.slipLines = {}; S.importNote = null;
+      S.slip = []; saveSlip(); S.slipEval = null; S.slipStake = null; S.track = null; S.slipLines = {}; S.importNote = null; S.slipPayout = ""; S.importSingles = null;
       renderSlip(); renderMain();
     } catch (err) { toast(String(err.message || err)); }
     return;
@@ -2305,6 +2362,7 @@ document.addEventListener("input", (e) => {
     return;
   }
   if (t.id === "slipStake") { S.slipStake = t.value; updateSlipCalc(); return; }
+  if (t.id === "slipPayout") { S.slipPayout = t.value; updateSlipCalc(); return; }
   const bind = t.dataset.bind;
   if (!bind) return;
   const [obj, key] = bind.split(".");

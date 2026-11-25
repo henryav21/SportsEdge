@@ -43,7 +43,8 @@ STATS = [(re.compile(p), k) for p, k in STATS]
 OU = re.compile(r"\b(over|under|o|u)\s*(\d+(?:\.\d+)?)\b")
 PLUS = re.compile(r"\b(\d+)\+(?!\d)")
 SIGNED = re.compile(r"(?<![\w.])([+\-−])\s?(\d+(?:\.\d+)?)(?![\d.])")
-MONEY = re.compile(r"\$\s?(\d[\d,]*(?:\.\d+)?)")
+MONEY = re.compile(r"(?<!\+)\$\s?(\d[\d,]*(?:\.\d+)?)")  # not "+$5", a quick-add button
+PRICE = re.compile(r"(?<![\d.])(\d{1,2}(?:\.\d)?)\s?(?:%|¢)")     # a contract's price on a trade slip: 52% or 52¢
 STAKE_WORD = re.compile(r"wager|stake|risk|bet amount|amount bet|total bet")
 PAYS_WORD = re.compile(r"to win|to pay|payout|pays|returns?|winnings")
 ODDS_WORD = re.compile(r"\bodds\b|parlay|\bsgp\b|\bpicks?\b|\blegs?\b")
@@ -137,12 +138,18 @@ def _scan(raw: str, pool: Pool) -> dict:
             "odds": [v for v, s in signed if abs(v) >= 100 and float(v).is_integer()],
             "handicap": [v for v, s in signed if abs(v) < 60],
             "money": [float(m.replace(",", "")) for m in MONEY.findall(raw)],
+            "price": next((float(x) for x in PRICE.findall(raw) if 0 < float(x) < 100), None),
+            "pays": bool(PAYS_WORD.search(t)), "stake_word": bool(STAKE_WORD.search(t)),
             "ml": bool(ML_WORD.search(t)), "total_word": "total" in t}
 
 
 def read(text: str, legs: list[dict]) -> dict:
-    """{'picks': [{key, selection, line, tool_line, text}], 'odds', 'stake', 'unmatched': [{text, why}]}.
-    `line` is the line on the slip where it differs from the tool's (None when they agree or there is none)."""
+    """{'picks': [{key, selection, line, tool_line, text}], 'odds', 'stake', 'singles', 'unmatched': [{text, why}]}.
+    `line` is the line on the slip where it differs from the tool's (None when they agree or there is none).
+
+    A trade slip (a trading app's bet slip) gives each pick a price as a percent and, for a stake, a payout.
+    When every pick has its own payout they are separate single bets, returned in 'singles' with the odds
+    each one really pays: payout over stake, which already has the app's fee in it."""
     pool = Pool(legs)
     rows = [_scan(ln.strip(), pool) for ln in (text or "").splitlines() if ln.strip()]
     picks, unmatched, used = {}, [], set()
@@ -150,13 +157,16 @@ def read(text: str, legs: list[dict]) -> dict:
     def near(i, order):
         return [(j, rows[j]) for j in (i + d for d in order) if 0 <= j < len(rows)]
 
-    def add(leg, line, src):
+    where: dict = {}  # pick key -> the row it was read from
+
+    def add(leg, line, src, at=None):
         if leg["key"] in picks:
             return
         tool = leg.get("line")
         differs = line is not None and tool is not None and abs(float(tool) - float(line)) > 1e-9
         picks[leg["key"]] = {"key": leg["key"], "selection": leg.get("selection"), "tool_line": tool,
                              "line": float(line) if differs else None, "text": src}
+        where[leg["key"]] = next((j for j, x in enumerate(rows) if x["raw"] == src), 0) if at is None else at
 
     # 1) player props: the player's line, with the side, number and stat from it or the lines around it
     for i, r in enumerate(rows):
@@ -187,7 +197,7 @@ def read(text: str, legs: list[dict]) -> dict:
                 unmatched.append({"text": r["raw"], "why": "the tool has no line for this player and stat"})
                 continue
             used.add(i)
-            add(leg, line, r["raw"])
+            add(leg, line, r["raw"], i)
 
     # 2) game bets: a spread or moneyline on a line that names a team, a total on an over/under line
     for i, r in enumerate(rows):
@@ -208,7 +218,7 @@ def read(text: str, legs: list[dict]) -> dict:
             leg = pool.leg(game["sport"], game["game_id"], "total", side)
             if leg:
                 used.add(i)
-                add(leg, val, r["raw"])
+                add(leg, val, r["raw"], i)
             continue
         if not r["teams"]:
             continue
@@ -224,19 +234,60 @@ def read(text: str, legs: list[dict]) -> dict:
             leg = pool.leg(game["sport"], game["game_id"], "spread", side)
             if leg:
                 used.add(i)
-                add(leg, r["handicap"][0], r["raw"])
+                add(leg, r["handicap"][0], r["raw"], i)
         elif any(x["ml"] for _, x in near(i, (0, 1, -1))):
             leg = pool.leg(game["sport"], game["game_id"], "ml", side)
             if leg:
                 used.add(i)
-                add(leg, None, r["raw"])
+                add(leg, None, r["raw"], i)
 
-    # 3) the odds for the whole bet, and the stake
+    # 3) what sits under each pick on a trade slip: its price, its stake and what that stake pays
+    order = sorted(picks, key=lambda k: where[k])
+    first = where[order[0]] if order else len(rows)
+    under = {}
+    for n, k in enumerate(order):
+        end = where[order[n + 1]] if n + 1 < len(order) else len(rows)
+        mine = rows[where[k]:end]
+        under[k] = {"price": next((x["price"] for x in mine if x["price"] is not None), None),
+                    "payout": next((x["money"][0] for x in mine if x["pays"] and x["money"]), None),
+                    "stake": next((x["money"][0] for x in mine if x["money"] and not x["pays"] and not x["stake_word"]), None)}
+
+    def american(dec):
+        return None if dec is None or dec <= 1 else ((dec - 1) * 100 if dec >= 2 else -100 / (dec - 1))
+
+    # 4) the odds for the whole bet, and the stake. Money before the first pick is the account balance, not a stake
     marked = [o for r in rows if ODDS_WORD.search(r["text"]) for o in r["odds"]]
     every = [o for r in rows for o in r["odds"]]
     odds = marked[0] if marked else (max(every) if every and len(picks) > 1 else (every[0] if every else None))
-    stake = next((r["money"][0] for r in rows if r["money"] and STAKE_WORD.search(r["text"]) and not PAYS_WORD.search(r["text"])), None)
+    body = list(enumerate(rows))[first:]
+    stake = next((r["money"][0] for _, r in body if r["money"] and r["stake_word"] and not r["pays"]), None)
+    if stake is None:  # "Stake All" on one line, the amount on the next
+        stake = next((rows[j + 1]["money"][0] for j, r in body if r["stake_word"] and not r["money"] and j + 1 < len(rows)
+                      and rows[j + 1]["money"] and not rows[j + 1]["pays"]), None)
     if stake is None:
-        plain = [r["money"][0] for r in rows if r["money"] and not PAYS_WORD.search(r["text"])]
+        plain = [r["money"][0] for _, r in body if r["money"] and not r["pays"]]
         stake = plain[0] if len(plain) == 1 else None
-    return {"picks": list(picks.values()), "odds": odds, "stake": stake, "unmatched": unmatched, "lines_read": len(rows)}
+    payouts = [r["money"][0] for _, r in body if r["pays"] and r["money"]]
+    price = payout = None
+    singles = []
+    if order and all(under[k]["payout"] is not None for k in order) and (len(order) > 1 or odds is None):
+        for k in order:  # each pick has its own payout: separate single bets
+            u = under[k]
+            st = u["stake"] if u["stake"] is not None else stake
+            dec = u["payout"] / st if st else (100.0 / u["price"] if u["price"] else None)
+            singles.append({**picks[k], "stake": st, "payout": u["payout"], "price": u["price"], "odds": american(dec)})
+        if len(order) == 1:  # one pick: it is simply the bet
+            odds, stake = singles[0]["odds"], singles[0]["stake"]
+            price, payout = singles[0]["price"], singles[0]["payout"]
+            singles = []
+    elif odds is None and order:
+        # a combo on a trade slip: one payout for the stake, or failing that one price
+        if len(payouts) == 1 and stake:
+            payout = payouts[0]
+            odds = american(payout / stake)
+        else:
+            prices = [r["price"] for _, r in body if r["price"] is not None]
+            price = prices[-1] if prices and len(order) == 1 else None
+            odds = american(100.0 / price) if price else None
+    return {"picks": list(picks.values()), "odds": odds, "stake": stake, "price": price, "payout": payout, "singles": singles,
+            "unmatched": unmatched, "lines_read": len(rows)}
