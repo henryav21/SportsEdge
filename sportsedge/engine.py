@@ -44,6 +44,52 @@ def game_info(sport: str, r, model, gl: list[dict], o: dict) -> dict:
     return info
 
 
+def price_at(res: dict, leg: dict, line: float, change: dict | None = None) -> dict | None:
+    """The same pick at a different line, priced there: for a bet made at an alternate line or on an app whose
+    line is not the feed's. A spread or total is read from the score distributions; a prop from the player's
+    simulated stat, with the market side moved from the reference line as for any other sportsbook's line.
+    change: the user's own correction of this game's line, if there is one. None when it cannot be priced
+    (a moneyline has no line, or the simulation for it is no longer loaded)."""
+    mk, gid, sport = leg.get("market_key"), leg["game_id"], res["sport"]
+    line = float(line)
+    if mk in ("spread", "total"):
+        if gid not in res.get("_feed_rows", {}) or gid not in res.get("_sims", {}):
+            return None
+        model = res["_model"]
+        row, odds = dict(res["_feed_rows"][gid]), dict(res["_feed_odds"][gid])
+        change = {k: float(v) for k, v in (change or {}).items() if k in LINE_FIELDS and v is not None}
+        odds.update(change)
+        if "spread_home" in change:
+            row["mkt_margin"] = -change["spread_home"]
+        if "total" in change:
+            row["mkt_total"] = change["total"]
+        row["mu_margin"] = float(model.blend(row["pm"], row["mkt_margin"], model.w_margin))
+        row["mu_total"] = float(model.blend(row["pt"], row["mkt_total"], model.w_total))
+        new = markets.game_leg_at(sport, SimpleNamespace(**row), model, res["_sims"][gid], odds, mk, leg["side"], line)
+    elif mk == "ml" or leg.get("side") not in ("over", "under"):
+        return None
+    else:
+        sims, who = res.get("prop_sims") or {}, leg.get("player_key")
+        ref = (res.get("prop_ref") or {}).get((who, mk))
+        if gid not in sims or who not in sims[gid] or mk not in sims[gid][who] or ref is None:
+            return None
+        df = pd.DataFrame([{"sport": sport, "player": leg.get("subject"), "key": who, "market": mk, "line": line,
+                            "over_odds": leg["odds"], "under_odds": leg["odds"], "book": leg.get("book") or ""}])
+        out = markets.prop_legs(sport, df, sims, res["slate"], res["labels"], res.get("prop_centre") or {"*": 0.0},
+                                {(who, mk): ref})
+        new = next((l for l in out if l["side"] == leg["side"]), None)
+        if new is not None:
+            new["p_fair"] = None  # the prices handed in were placeholders: there is no market price at this line
+            new["edge"] = np.nan
+    if new is None:
+        return None
+    # the price shown with it still belongs to the tool's line; the caller supplies the real one
+    new.update(odds=leg["odds"], dec=leg["dec"], alt_of=leg.get("line"), book=leg.get("book") or "")
+    if leg.get("assumed"):
+        new["assumed"] = True
+    return new
+
+
 def reprice_game(res: dict, game_id, change: dict | None) -> list[dict]:
     """The sportsbook's line has moved and the feed has not caught up: re-price one game at the line the
     user reads off their sportsbook. The corrected number is treated as the market's line, exactly as if the

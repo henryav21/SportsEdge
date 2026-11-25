@@ -33,8 +33,8 @@ PARLAY_COLS = ["key", "logged_at", "mode", "date", "legs", "legs_json", "n", "od
 LEG_FIELDS = ["key", "sport", "game_id", "date", "home", "away", "market_key", "side", "player_key", "line", "dec"]
 EXPIRE_DAYS = 10  # an open pick with no official result after this long is voided
 # p_fair and book are kept so that later line movement can be measured against the number the bet was made at
-# ref_line: the tool's line, when the bet was recorded at a different one. The stored chance belongs to it.
-BET_LEG_EXTRA = ["selection", "subject", "market", "odds", "p_cond", "p_push", "proj", "start", "p_fair", "book", "ref_line"]
+# chance_line: the tool's line, when the bet was recorded at a different one. The stored chance belongs to it.
+BET_LEG_EXTRA = ["selection", "subject", "market", "odds", "p_cond", "p_push", "proj", "start", "p_fair", "book", "chance_line"]
 
 NFL_STAT = {"pass_yds": ["passing_yards"], "pass_tds": ["passing_tds"], "pass_cmp": ["completions"],
             "pass_att": ["attempts"], "rush_yds": ["rushing_yards"], "rush_att": ["carries"],
@@ -178,7 +178,7 @@ def with_line(leg: dict, line: float) -> dict:
     else:
         name = f"{leg.get('subject')} {'o' if side == 'over' else 'u'}{line:g} {leg.get('market')}"
     # the chance stored with the pick is for the tool's line, so that line is kept beside the new one
-    return {**leg, "line": line, "selection": name, "ref_line": leg.get("ref_line", leg.get("line"))}
+    return {**leg, "line": line, "selection": name, "chance_line": leg.get("chance_line", leg.get("line"))}
 
 
 def _jsonable(v):

@@ -57,6 +57,9 @@ def main(argv=None):
     pc = sub.add_parser("passcode", help="set the passcode that guards remote access")
     pc.add_argument("--clear", action="store_true", help="remove the passcode (locks remote access)")
 
+    au = sub.add_parser("autostart", help="start the dashboard and its remote address when you sign in to Windows")
+    au.add_argument("state", nargs="?", choices=["on", "off", "status"], default="status")
+
     f = sub.add_parser("factors", help="show learned factor weights")
     f.add_argument("--sport", choices=["nfl", "nba"], default="nfl")
 
@@ -103,6 +106,23 @@ def main(argv=None):
         from . import share
 
         share.run(port=a.port)
+    elif a.cmd == "autostart":
+        from . import autostart
+
+        try:
+            if a.state == "on":
+                where = autostart.enable()
+                print("On. The dashboard and its remote address will start when you sign in to Windows.")
+                print("It is this one file, which you can delete to undo it:")
+                print(f"  {where}")
+            elif a.state == "off":
+                print("Off: removed." if autostart.disable() else "It was not on.")
+            elif autostart.enabled():
+                print(f"On ({autostart.path()})")
+            else:
+                print("Off. Turn it on with:  .\\sportsedge autostart on")
+        except RuntimeError as e:
+            print(e)
     elif a.cmd == "passcode":
         import getpass
 

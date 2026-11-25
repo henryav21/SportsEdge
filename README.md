@@ -119,6 +119,20 @@ that way of writing prices.
   fee already in it, so the price box and the fee setting are then not used. Without a payout, only whole
   contracts are bought, as on the app, so a few cents of the spend can be left over.
 
+## A different line on your app
+
+Every pick in the bet slip has a **Your line** box. If your app or sportsbook has the pick at another line
+(an alternate line, or simply a different number from the feed's), type it and the pick is priced there.
+- **Spreads and totals:** the market's chance at your line is its no-vig price at its own line, moved by what
+  the gap between the two lines is worth in the score distribution, key numbers included. Three points to
+  three and a half is worth far more in the NFL than seven to seven and a half. The model's own shift is
+  then applied as at the main line.
+- **Player props:** the player's simulated stat is read at your line, with the market side moved from the
+  feed's line the same way.
+- The price the tool shows still belongs to its own line, so the price box is emptied until you type the
+  price or payout for yours. A bet recorded this way is stored at your line with its chance at that line.
+- A game that has started cannot be priced at another line (its simulation is gone), only recorded at it.
+
 ## Pasting a bet slip
 
 **Paste a slip**, at the top of the bet slip, reads a bet copied as text from your sportsbook (the slip or
@@ -148,14 +162,25 @@ over/under props), and the Live page shows them on the scoreboard next to the pr
   of them by a wide margin (for example 89% against the sportsbook's 50% on a spread in a blowout). A gap
   that size is the estimate being wrong: big leads shrink and starters sit. Showing those as bets would
   lose money.
-- **It logs them instead.** Each new live price is written beside the tool's estimate to
-  `history/live_log.csv`, so the estimate can be tested against results and given a weight, the way the
-  pre-game model and the prop simulator were.
+- **It logs them instead, and grades them.** Each new live price is written beside the tool's estimate to
+  `history/live_log.csv`. When a game ends, every logged price is settled from the final score and box
+  score (`history/live_graded.csv`). **How it works** then shows the estimate on trial: how many prices are
+  settled, and once there are enough (400 from 15 games), the weight the estimate would have earned in a
+  blend with the live price, the way the pre-game model and the prop simulator earned theirs.
+  The feed's live prices can be minutes old while the score is current, which flatters the estimate, so
+  bets already settled by the score and the last few minutes of a game are left out of the test.
 - **A hedge is arithmetic, so that is offered.** When a recorded bet has one pick left and its game is on,
   the bet's card shows how much to stake on the other side, at the live price, to finish with the same
   amount whichever way it goes. If the live line is not the line you bet, it also shows the stretch where
   both bets win (a middle) or both lose. The price is prefilled from the feed and can be typed over, since
   a live price moves faster than any feed.
+
+## What is riding on each game
+
+With several bets open, the Live page adds up what depends on each game: the stakes of every open bet that
+still needs it, as an amount and as a share of everything staked, with the picks involved. A parlay counts
+in full for every game it still needs, because any one of them can lose it, so the games can add up to more
+than the total staked. It is there to show when one game can sink most of a night.
 
 ## Line moves
 
@@ -223,6 +248,12 @@ Then each time: `.\sportsedge share`, and open the address it prints.
   page. Browsers on this computer are never asked.
 - `.\sportsedge passcode` again changes it and signs every device out.
   `.\sportsedge passcode --clear` locks remote access.
+
+**Starting with Windows.** `.\sportsedge autostart on` makes the dashboard and its address come back by
+themselves when you sign in, so a restart does not take the address down. It is one file in your Startup
+folder that runs `sportsedge share` in a minimised window; `.\sportsedge autostart off` (or deleting the
+file) undoes it, and `.\sportsedge autostart` says which it is. It starts when you sign in, not before, and
+because sharing keeps the computer awake, the computer will not sleep while it runs.
 
 ## What goes into a prediction
 
@@ -397,6 +428,7 @@ edge to flag, and the seasons used.
 | `markets.py`, `parlay.py` | Pricing, market centring, EV, Kelly, parlay search |
 | `plays.py` | Top picks per game and the best parlays per game, group of games and day |
 | `slipread.py` | Reads a bet slip pasted as text and matches its picks to the tool's |
+| `autostart.py` | Starts the dashboard and its address when you sign in to Windows |
 | `sources.py` | ESPN (schedule, odds, prop lines, injuries), Open-Meteo, The Odds API |
 | `tracker.py` | Logs picks and your bets, settles them, closing-line value, learned prop weight |
 | `live.py` | Live scores and stat lines for open bets, live chances, cash-out check, today's scoreboard |

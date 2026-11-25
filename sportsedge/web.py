@@ -264,10 +264,35 @@ def _started() -> dict:
     return {k: l for k, l in _STARTED["legs"].items() if k not in STATE["legs"]}
 
 
-def _picks(keys: list[str]) -> list[dict]:
-    """The picks for these keys: from the slate, or for a game that has started, from its last number."""
-    late = _started()
-    return [STATE["legs"].get(k) or late[k] for k in keys if k in STATE["legs"] or k in late]
+def _at_line(leg: dict, line: float) -> dict:
+    """The pick at another line. A game still to come is priced at that line. One that has started cannot be
+    (its simulation is gone), so it keeps its last chance with the tool's line noted beside it."""
+    if not leg.get("started"):
+        res = next((r for r in STATE["results"] if r["sport"] == str(leg["sport"]).lower()), None)
+        if res is not None:
+            try:
+                ov = STATE["overrides"].get((res["sport"], leg["game_id"])) or {}
+                new = engine.price_at(res, leg, line, ov.get("change"))
+                if new is not None:
+                    return new
+            except Exception as e:
+                _log(f"Could not price {leg.get('selection')} at {line}: {e!r}")
+    return tracker.with_line(leg, line)
+
+
+def _picks(keys: list[str], lines: dict | None = None) -> list[dict]:
+    """The picks for these keys: from the slate, or for a game that has started, from its last number.
+    lines: the line to take a pick at, where the bettor's is not the tool's."""
+    late, out = _started(), []
+    for k in keys:
+        leg = STATE["legs"].get(k) or late.get(k)
+        if leg is None:
+            continue
+        mine = (lines or {}).get(k)
+        if mine is not None and leg.get("line") is not None and abs(float(mine) - float(leg["line"])) > 1e-9:
+            leg = _at_line(leg, float(mine))
+        out.append(leg)
+    return out
 
 
 # ============================================================================= automatic odds check
@@ -360,6 +385,7 @@ def _odds_loop():
             check_odds()
             try:
                 _live_board()  # logs each new live price beside the tool's estimate, for testing against results
+                live.grade_log()  # and settles the logged prices of games that have finished
             except Exception as e:
                 _log(f"Live price log skipped: {e!r}")
             last = dt.datetime.fromisoformat(STATE["run_at"]) if STATE["run_at"] else None
@@ -391,6 +417,7 @@ class RunReq(BaseModel):
 
 class SlipReq(BaseModel):
     keys: list[str]
+    lines: dict[str, float] = {}  # pick key -> the line to price it at, where it is not the tool's
 
 
 class ImportReq(BaseModel):
@@ -517,6 +544,11 @@ def api_slate():
                                                          "home": l["home"], "away": l["away"], "start": l["start"], "legs": []})
         g["legs"].append({f: l.get(f) for f in STARTED_FIELDS})
     out["started"] = clean(sorted(late.values(), key=lambda g: g["start"]))
+    try:
+        out["live_test"] = clean(live.log_summary())
+    except Exception as e:
+        _log(f"Live test summary skipped: {e!r}")
+        out["live_test"] = None
     sug = STATE.get("plays") or {}
     lean = [{f: l.get(f) for f in LEAN_FIELDS} for l in STATE["legs"].values() if l.get("assumed")]
     out["plays"] = clean({"games": sug.get("games") or [], "groups": sug.get("groups") or [], "days": sug.get("days") or [],
@@ -534,10 +566,14 @@ def api_slip_import(req: ImportReq):
 
 @app.post("/api/slip")
 def api_slip(req: SlipReq):
-    legs = _picks(req.keys)
+    legs = _picks(req.keys, req.lines)
     if not legs:
         return {"n": 0}
-    return clean(parlay.evaluate(legs))
+    # a pick taken at another line: what it is called there, its chance there, and whether it could be priced
+    alts = {l["key"]: {"line": l.get("line"), "selection": l.get("selection"), "p_cond": l.get("p_cond"),
+                       "priced": l.get("alt_of") is not None} for l in legs if l["key"] in req.lines and
+            (l.get("alt_of") is not None or l.get("chance_line") is not None)}
+    return clean({**parlay.evaluate(legs), "alts": alts})
 
 
 @app.post("/api/props/price")
@@ -757,7 +793,7 @@ def api_grade():
 
 @app.post("/api/bets")
 def api_place(req: BetReq):
-    legs = [tracker.with_line(l, req.lines[l["key"]]) if l["key"] in req.lines else l for l in _picks(req.keys)]
+    legs = _picks(req.keys, req.lines)
     if not legs:
         raise HTTPException(400, "Those picks are no longer loaded - refresh the slate.")
     if req.stake <= 0:

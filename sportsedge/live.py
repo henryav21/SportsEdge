@@ -21,6 +21,7 @@ import json
 import math
 import time
 
+import numpy as np
 import pandas as pd
 
 from . import sources
@@ -491,6 +492,111 @@ def board(pre_legs: list[dict], sd_by_sport: dict | None = None, day: dt.date | 
     return {"games": games, "rows": rows}
 
 
+# --- testing the live estimate: each logged price is settled once its game is over
+GRADED_COLS = LOG_COLS + ["result"]
+READY_PRICES, READY_GAMES = 400, 15  # fewer than this and any verdict is noise
+
+
+def _graded_path():
+    from .tracker import history_dir
+
+    return history_dir() / "live_graded.csv"
+
+
+def final(sport: str, event_id: str) -> dict | None:
+    """A finished game's score and box score, or None while it is not final."""
+    try:
+        j = sources._get(f"{SITE}/{sources.ESPN_PATH[sport]}/summary", {"event": event_id}, tries=2)
+    except RuntimeError:
+        return None
+    c = ((j.get("header") or {}).get("competitions") or [{}])[0]
+    if not ((c.get("status") or {}).get("type") or {}).get("completed"):
+        return None
+    score = {x.get("homeAway"): float(x.get("score") or 0) for x in c.get("competitors", [])}
+    if "home" not in score or "away" not in score:
+        return None
+    return {"margin": score["home"] - score["away"], "total": score["home"] + score["away"],
+            "players": parse_boxscore(sport, j)["players"]}
+
+
+def settle_logged(key: str, line, fin: dict) -> str:
+    """won / lost / push / void for one logged live price, from the final score or the player's final stat."""
+    parts = str(key).split("|")
+    mk, side, who = parts[2], parts[3], (parts[4] if len(parts) > 4 else "")
+    line = None if line is None or pd.isna(line) else float(line)
+    if mk in ("ml", "spread", "total"):
+        return settle_game(mk, side, line, fin["margin"], fin["total"])[0]
+    stat = fin["players"].get(who)
+    if stat is None or mk not in stat:
+        return "void"  # he did not play, or the box score does not carry this stat
+    return settle_prop(side, line, float(stat[mk]))
+
+
+def grade_log(max_events: int = 12) -> int:
+    """Settle every logged live price whose game has finished. Returns how many were settled this time."""
+    path, out = _log_path(), _graded_path()
+    if not path.exists():
+        return 0
+    log = pd.read_csv(path, dtype={"event_id": str, "key": str})
+    if log.empty:
+        return 0
+    done = set()
+    if out.exists():
+        g = pd.read_csv(out, dtype={"event_id": str, "key": str}, usecols=["key", "line"])
+        done = set(zip(g["key"], g["line"].astype(str)))
+    todo = log[[(k, str(l)) not in done for k, l in zip(log["key"], log["line"])]]
+    todo = todo[pd.to_datetime(todo["ts"], utc=True, errors="coerce") >= pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=4)]
+    rows = []
+    for (sport, eid), grp in list(todo.groupby(["sport", "event_id"]))[:max_events]:
+        fin = _fresh(("final", "graded", sport, eid), lambda: final(sport, eid), ttl=600)
+        if fin is None:
+            continue
+        for r in grp.to_dict("records"):
+            rows.append({**{c: r.get(c) for c in LOG_COLS}, "result": settle_logged(r["key"], r["line"], fin)})
+    if rows:
+        pd.DataFrame(rows, columns=GRADED_COLS).to_csv(out, mode="a", header=not out.exists(), index=False)
+    return len(rows)
+
+
+def log_summary() -> dict:
+    """How the live estimate has done against the sportsbook's live prices, on prices whose games are over.
+
+    Each market is counted once (the over, or the home side: the other side is the same bet seen backwards).
+    w is the weight on the estimate, in a blend with the live price, that would have predicted results best:
+    0 means the price alone was better. Nothing here is acted on until there is enough of it."""
+    out = _graded_path()
+    empty = {"n": 0, "games": 0, "ready": False, "need_prices": READY_PRICES, "need_games": READY_GAMES}
+    if not out.exists():
+        return empty
+    g = pd.read_csv(out, dtype={"event_id": str, "key": str})
+    g = g[g["result"].isin(["won", "lost"])]
+    side = g["key"].str.split("|").str[3]
+    g = g[side.isin(["over", "home"])].dropna(subset=["p_tool", "q_book"])
+    # The feed's live prices can be minutes old. A bet that is already settled by the score, or the last few
+    # minutes of a game, is where a stale price shows most and would flatter the estimate: leave those out.
+    g = g[(g["p_tool"] > 0.03) & (g["p_tool"] < 0.97) & (g["left"] >= 0.08)]
+    if g.empty:
+        return empty
+    y = (g["result"] == "won").to_numpy(float)
+    p = g["p_tool"].clip(0.01, 0.99).to_numpy(float)
+    q = g["q_book"].clip(0.01, 0.99).to_numpy(float)
+    ll = lambda x: float(-(y * np.log(x) + (1 - y) * np.log(1 - x)).mean())  # noqa: E731
+    ws = [i / 20 for i in range(21)]
+    w = min(ws, key=lambda w: ll(w * p + (1 - w) * q))
+    buckets = []
+    gap = np.abs(p - q)
+    for lo, hi in ((0.0, 0.05), (0.05, 0.10), (0.10, 0.20), (0.20, 1.01)):
+        m = (gap >= lo) & (gap < hi)
+        if m.sum():
+            tool_side = np.where(p[m] >= q[m], y[m], 1 - y[m])          # did the side the estimate preferred win?
+            book_side = np.where(p[m] >= q[m], q[m], 1 - q[m])          # what the live price gave that side
+            buckets.append({"lo": lo, "hi": min(hi, 1.0), "n": int(m.sum()), "won": float(tool_side.mean()), "book": float(book_side.mean())})
+    n, games = int(len(g)), int(g["event_id"].nunique())
+    return {"n": n, "games": games, "ready": n >= READY_PRICES and games >= READY_GAMES, "need_prices": READY_PRICES,
+            "need_games": READY_GAMES, "ll_tool": ll(p), "ll_book": ll(q), "w": float(w), "buckets": buckets,
+            "since": str(g["ts"].min())}
+
+
 def _flip(key: str) -> str | None:
     """The key of the other side of the same bet."""
     parts = key.split("|")
@@ -579,7 +685,7 @@ def leg_view(leg: dict, sd: dict | None = None, fresh: dict | None = None) -> di
     # The line that chance belongs to: the tool's line now if the pick is still listed, otherwise the tool's
     # line when the bet was recorded. If the bet was made at another line, the pre-game expectation is read
     # from the tool's line and the chance is then worked out at the bet's own.
-    ref = (fresh or {}).get("line") if fresh else leg.get("ref_line")
+    ref = (fresh or {}).get("line") if fresh else leg.get("chance_line")
     ref = None if ref is None or pd.isna(ref) or line is None or abs(float(ref) - line) < 1e-9 else float(ref)
     base = {**leg, "p_cond": p_ref} if ref is None else {**leg, "p_cond": p_ref, "line": ref}
     at = None if ref is None else line

@@ -103,6 +103,56 @@ def game_legs(sport: str, g, model, sims: dict, odds: dict) -> list[dict]:
     return [l for l in legs if l is not None]
 
 
+def game_leg_at(sport: str, g, model, sims: dict, odds: dict, market_key: str, side: str, line: float) -> dict | None:
+    """One side of a spread or total at a line other than the sportsbook's own: an alternate line, or the
+    line a different app is offering.
+
+    There is no price for that line, so the market's chance there is its no-vig price at its own line, moved
+    by what the gap between the two lines is worth in the market-centred score distribution (key numbers
+    included). The model's shift is then applied exactly as it is at the main line. `line` is from the
+    pick's own side, as everywhere else: the away team at +7.5 is line 7.5."""
+    M, T = sims["margin"], sims["total"]
+    base = _base(sport, g.game_id, g.home, g.away, g.start, f"{g.away} @ {g.home}", odds.get("book"))
+    line = float(line)
+    if market_key == "spread":
+        L0 = odds.get("spread_home")
+        if L0 is None or np.isnan(L0):
+            return None
+        home = side == "home"
+        L = line if home else -line                      # the same line seen from the home side
+        fh, fa = _fair_pair(odds.get("spread_home_odds"), odds.get("spread_away_odds"))
+        fair, o = (fh, odds.get("spread_home_odds")) if home else (fa, odds.get("spread_away_odds"))
+        dB, d0 = model.dist_margin(g.mu_margin), model.dist_margin(g.pm)
+        dK = model.dist_margin(g.mkt_margin) if not np.isnan(g.mkt_margin) else dB
+        kind, x0, x = ("gt" if home else "lt"), -float(L0), -L
+        result = _result(M + L > 0, M + L == 0) if home else _result(M + L < 0, M + L == 0)
+        sel, market, grp = (f"{g.home} {L:+g}" if home else f"{g.away} {-L:+g}"), "Spread", f"{g.game_id}|side"
+    elif market_key == "total":
+        X0 = odds.get("total")
+        if X0 is None or np.isnan(X0):
+            return None
+        over = side == "over"
+        fo, fu = _fair_pair(odds.get("over_odds"), odds.get("under_odds"))
+        fair, o = (fo, odds.get("over_odds")) if over else (fu, odds.get("under_odds"))
+        dB, d0 = model.dist_total(g.mu_total), model.dist_total(g.pt)
+        dK = model.dist_total(g.mkt_total) if not np.isnan(g.mkt_total) else dB
+        kind, x0, x = ("gt" if over else "lt"), float(X0), line
+        result = _result(T > line, T == line) if over else _result(T < line, T == line)
+        sel, market, grp = f"{'Over' if over else 'Under'} {line:g}", "Total", f"{g.game_id}|total"
+    else:
+        return None
+    pb = _cond(dB, kind, x)
+    if fair is None or np.isnan(fair):
+        pc, fair_at = pb, np.nan
+    else:
+        fair_at = float(np.clip(fair + _cond(dK, kind, x) - _cond(dK, kind, x0), 0.005, 0.995))  # the market, moved to this line
+        pc = float(np.clip(fair + pb - _cond(dK, kind, x0), 0.005, 0.995))
+    pp = dB.p_eq(x)
+    o = -110.0 if o is None or np.isnan(o) else o  # the price belongs to the other line: it is only a placeholder here
+    return _leg(base, sel, market, grp, o, pc * (1 - pp), pp, _cond(d0, kind, x), fair_at, result, line=line,
+                market_key=market_key, side=side)
+
+
 # Simulator vs no-vig market, after centring. On real lines (propcheck.py) disagreements below this were
 # not harmful in either sport; above it the NFL simulator's side lost more than it won, which is what
 # stale information (a role change, a late scratch) looks like. Such props are labelled and never listed as value.

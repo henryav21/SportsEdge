@@ -229,13 +229,20 @@ async function loadTrack() {
 
 function saveSlip() { localStorage.setItem("slip", JSON.stringify(S.slip)); }
 
+/* The lines typed into the slip that differ from the tool's own: pick key -> line. */
+function slipLinesNow() {
+  const out = {};
+  for (const k of S.slip) { const v = parseFloat(S.slipLines[k]), l = S.legs[k]; if (l && !isNaN(v) && l.line != null && Math.abs(v - l.line) > 1e-9) out[k] = v; }
+  return out;
+}
 async function evalSlip() {
   if (!S.slip.length) { S.slipEval = null; return; }
   try {
-    S.slipEval = await api("/api/slip", { method: "POST", body: JSON.stringify({ keys: S.slip }) });
+    S.slipEval = await api("/api/slip", { method: "POST", body: JSON.stringify({ keys: S.slip, lines: slipLinesNow() }) });
   } catch (_) { S.slipEval = null; }
   const start = S.keepOdds != null ? S.keepOdds : S.slipEval && S.slipEval.odds != null ? S.slipEval.odds : null;
   S.slipOdds = start == null ? null : boxPrice(start);
+  S.slipOddsTyped = S.keepOdds != null;  // a price that came from the user's own slip counts as theirs
   S.keepOdds = null;
 }
 
@@ -1349,6 +1356,31 @@ function scoreboard() {
       It is logging live prices against results so that can be tested. What it can work out exactly is a <b>hedge</b>: it appears on any recorded bet with one pick left.</p>` : ""}</div></section>`;
 }
 
+/* Everything that depends on each game: a parlay counts in full for every game it still needs, because any
+   one of them can lose it. */
+function exposure(open) {
+  const games = new Map();
+  for (const b of open) {
+    const left = b.legs.filter((v) => !v.decided);
+    for (const name of new Set(left.map((v) => v.game))) {
+      if (!games.has(name)) games.set(name, { game: name, stake: 0, pays: 0, bets: 0, picks: [], state: "pre", detail: "", score: "", start: null });
+      const g = games.get(name), mine = left.filter((v) => v.game === name);
+      g.stake += b.stake; g.pays += b.payout; g.bets += 1;
+      for (const v of mine) { g.picks.push(v.selection); if (v.state === "in") { g.state = "in"; g.detail = v.detail; g.score = v.score; } g.start = g.start || v.start; }
+    }
+  }
+  const list = [...games.values()].sort((a, b) => b.stake - a.stake);
+  if (list.length < 2 && open.length < 2) return "";
+  const total = open.reduce((n, b) => n + b.stake, 0);
+  return `<section class="card"><div class="hd"><h2>What is riding on each game</h2><span class="sub">${money(total, 2)} staked across ${open.length} open bet${open.length === 1 ? "" : "s"}</span></div>
+    <div class="bd"><div class="expo">${list.map((g) => `<div class="ex ${g.state === "in" ? "live" : ""}">
+        <div class="ex-hd"><b>${esc(g.game)}</b><span class="muted">${g.state === "in" ? `<span class="sc-live"><span class="dot"></span>Live</span> ${esc(g.detail)}` : g.start ? `starts ${when(g.start)}` : ""}</span></div>
+        <div class="ex-amt" title="The stakes of every open bet that still needs this game">${money(g.stake, 2)}<small>${total > 0 ? ` · ${pct(g.stake / total, 0)} of what you have staked` : ""}</small></div>
+        <div class="ex-bar" aria-hidden="true"><i style="width:${total > 0 ? Math.round((100 * g.stake) / total) : 0}%"></i></div>
+        <div class="muted ex-picks">${g.bets} bet${g.bets === 1 ? "" : "s"}: ${[...new Set(g.picks)].map(esc).join(", ")}</div></div>`).join("")}</div>
+      <p class="note" style="margin:10px 0 0">A parlay counts in full for every game it still needs, since any one of them can lose it. So these can add up to more than you have staked.</p></div></section>`;
+}
+
 function pageLive() {
   const head = pageHead("🔴 Live", "Your recorded bets as they stand right now, pick by pick, with real scores and stat lines, plus today's scoreboard with every player's stats. It checks for new numbers every 30 seconds while a game is on.");
   if (!S.live && !S.liveErr) return `${head}<div class="empty"><span class="spinner"></span>Checking the games ...</div>`;
@@ -1366,6 +1398,7 @@ function pageLive() {
   return `${head}${bar}
     ${open.length ? `<div class="tiles"><div class="tile"><div class="label">Open bets</div><div class="value">${open.length}</div><div class="delta">${money(atStake, 2)} staked</div></div>
       <div class="tile"><div class="label">Worth right now</div><div class="value">${money(worth, 2)}</div><div class="delta">all open bets, at the tool's live estimates</div></div></div>` : ""}
+    ${exposure(open)}
     <div class="banner"><span aria-hidden="true">ⓘ</span><span>Scores and stats are real. The <b>chance now</b> figures are rough estimates from the score, the clock and each player's pace: they do not know about foul trouble, injuries during the game or who has the ball. Use them as a guide, and check the final result on your sportsbook.</span></div>
     ${open.map(liveBet).join("")}
     ${done.length ? `<h2 class="sec-title">Finished in the last day</h2>${done.map(liveBet).join("")}` : ""}
@@ -1622,6 +1655,25 @@ function myBetsCard(B) {
 }
 
 // ============================================================================ how it works page
+/* The live estimate against the sportsbook's live prices, on games that are over. No verdict until there is enough. */
+function liveTestCard() {
+  const t = S.slate.live_test;
+  if (!t) return "";
+  const head = `<div class="hd"><h2>Live estimate: on trial</h2><span class="sub">the tool's in-game read, tested against the sportsbook's live prices</span></div>`;
+  const why = `<p class="note" style="margin:0 0 10px">During a game the tool estimates each bet's chance from the score, the clock and the box score. It does not suggest live bets from that, because the estimate is unproven.
+      Instead every live price it sees is saved beside its own estimate and settled when the game ends. Once there is enough, this shows whether the estimate adds anything to the price.</p>`;
+  if (!t.n) return `<section class="card">${head}<div class="bd">${why}<div class="empty" style="padding-left:0">No live prices settled yet. They are collected while the dashboard is running and games are on.</div></div></section>`;
+  const tiles = `<div class="tiles" style="margin-bottom:10px">
+      <div class="tile"><div class="label">Live prices settled</div><div class="value">${t.n.toLocaleString()}</div><div class="delta">from ${t.games} game${t.games === 1 ? "" : "s"} · needs ${t.need_prices} from ${t.need_games}</div></div>
+      ${t.ready ? `<div class="tile"><div class="label">Weight the estimate has earned</div><div class="value">${pct(t.w, 0)}</div><div class="delta">${t.w > 0 ? "blended with the live price, it predicted better than the price alone" : "the live price alone predicted better"}</div></div>
+      <div class="tile"><div class="label">Prediction error: estimate vs price</div><div class="value">${num(t.ll_tool, 3)} <span class="muted" style="font-size:15px">vs ${num(t.ll_book, 3)}</span></div><div class="delta">lower is better</div></div>` : `<div class="tile"><div class="label">Verdict</div><div class="value">Not yet</div><div class="delta">too few to tell skill from luck</div></div>`}</div>`;
+  const rows = t.ready && t.buckets && t.buckets.length ? `<div class="tw"><table class="t"><thead><tr><th>Estimate and price disagree by</th><th class="num">Prices</th><th class="num">Estimate's side won</th><th class="num">The price gave it</th></tr></thead><tbody>
+      ${t.buckets.map((b) => `<tr><td>${Math.round(b.lo * 100)} to ${Math.round(b.hi * 100)} points</td><td class="num">${b.n}</td><td class="num">${pct(b.won, 0)}</td><td class="num">${pct(b.book, 0)}</td></tr>`).join("")}</tbody></table></div>` : "";
+  return `<section class="card">${head}<div class="bd">${why}${tiles}${rows}
+    <p class="note" style="margin:8px 0 0">Read a good result here with suspicion. The feed's live prices can be minutes old while the score is current, which flatters the estimate.
+      Bets already settled by the score and the last few minutes of a game are left out for that reason.</p></div></section>`;
+}
+
 function pageModel() {
   const steps = `<section class="card"><div class="hd"><h2>How a pick is made</h2></div><div class="bd"><ol class="steps">
       <li><b>Rate the teams and players.</b> Several seasons of results are turned into ratings that adjust for the opponent, with recent games counting more. Injuries, rest, travel, weather and the starting quarterback are added on top.</li>
@@ -1661,7 +1713,7 @@ function pageModel() {
     }
     return game + prop;
   });
-  return `${pageHead("💡 How it works", "What the tool does with the data, and how well it has done against real sportsbook lines.")}${steps}${cards.join("")}
+  return `${pageHead("💡 How it works", "What the tool does with the data, and how well it has done against real sportsbook lines.")}${steps}${cards.join("")}${liveTestCard()}
     <p class="muted" style="font-size:12.5px">For the full betting replay of the game model, run <code>.\\sportsedge backtest</code> in a terminal.</p>`;
 }
 
@@ -1729,6 +1781,9 @@ function renderGuide() {
     <p>The Live page shows the sportsbook's in-game spread, total and moneyline for games in play. The tool does <b>not</b> suggest new live bets: its live estimate is too rough to beat a live price, and it says so rather than guess.
       What it does work out is a <b>hedge</b>. When a recorded bet has one pick left and that game is on, it shows how much to bet on the other side so you finish with the same amount whichever way it goes,
       and whether the two lines leave a stretch where both bets win (a middle) or both lose.</p>
+    <h3>A different line on your app</h3>
+    <p>Every pick in the bet slip has a <b>Your line</b> box. If your app or sportsbook has the pick at another line, type it and the pick is priced there: its win chance at your line, and in cents the most it is worth paying.
+      It works for spreads, totals and player props on games still to come. A game that has started cannot be priced at another line, only recorded at it.</p>
     <h3>Pasting a bet slip</h3>
     <p><b>Paste a slip</b>, at the top of the bet slip, reads a bet you copied as text from your sportsbook: it finds the picks, the odds and the stake and fills the slip in.
       Anything it cannot match to a pick the tool knows is listed, not guessed. Check each pick and its line, then record it. A screenshot cannot be read, only text.</p>
@@ -2026,10 +2081,17 @@ function renderSlip() {
       Add two or more to price a parlay. Already placed a bet? Use <b>Paste a slip</b> to fill this in from your sportsbook's text. Nothing is placed for you: this only does the maths.</div>`;
     return;
   }
-  html += `<div class="items">${legs.map((l) => `<div class="item"><div class="sel">${esc(l.selection)}</div>
+  const alts = (S.slipEval && S.slipEval.alts) || {};
+  html += `<div class="items">${legs.map((l) => {
+    const alt = alts[l.key], mine = slipLinesNow()[l.key];
+    // a pick taken at another line: priced there if its game is still to come, otherwise only renamed
+    const where = mine == null ? "" : alt && alt.priced ? `<span class="sline-note ok">priced at your line: <b>${esc(alt.selection)}</b>, win chance <b>${pct(alt.p_cond, 0)}</b>${inCents() ? `, worth up to <b>${fmtCents(worthUpTo(alt.p_cond))}</b>` : ""}. The tool's own line is ${lineNum(l.line)}.</span>`
+      : `<span class="sline-note">the tool has ${lineNum(l.line)}${l.started ? " and cannot price a game that has started at another line" : ""}: the chance shown is for that line</span>`;
+    return `<div class="item"><div class="sel">${esc(alt && alt.priced && mine != null ? alt.selection : l.selection)}</div>
       <button class="x" data-act="toggle" data-key="${esc(l.key)}" aria-label="Remove ${esc(l.selection)}">×</button>
-      <div class="meta">${esc(l.game)} · ${l.started ? `started · last price ${fmtOdds(l.odds)}` : l.assumed ? `no price in the feed (${fmtOdds(l.odds)} assumed)` : fmtOdds(l.odds)} · win chance ${l.started ? "before the game " : ""}${pct(l.p_cond, 0)}</div>
-      ${(l.started || S.slipLines[l.key] != null) && l.line != null ? `<label class="sline">Your line <input type="number" step="0.5" data-line-key="${esc(l.key)}" value="${esc(S.slipLines[l.key] ?? l.line)}" aria-label="The line you bet for ${esc(l.selection)}"></label>${!l.started && S.slipLines[l.key] != null && Math.abs(parseFloat(S.slipLines[l.key]) - l.line) > 1e-9 ? `<span class="sline-note">the tool has ${lineNum(l.line)}: the chance shown is for that line</span>` : ""}` : ""}</div>`).join("")}</div>`;
+      <div class="meta">${esc(l.game)} · ${l.started ? `started · last price ${fmtOdds(l.odds)}` : l.assumed ? `no price in the feed (${fmtOdds(l.odds)} assumed)` : `${fmtOdds(l.odds)}${mine != null ? " at the tool's line" : ""}`} · win chance ${l.started ? "before the game " : ""}${pct(alt && alt.priced && mine != null ? alt.p_cond : l.p_cond, 0)}</div>
+      ${l.line != null ? `<label class="sline" title="If your app or sportsbook has this pick at a different line, type it: the pick is priced at your line.">Your line <input type="number" step="0.5" data-line-key="${esc(l.key)}" value="${esc(S.slipLines[l.key] ?? l.line)}" aria-label="The line you are betting for ${esc(l.selection)}"></label>${where}` : ""}</div>`;
+  }).join("")}</div>`;
   const nAssumed = legs.filter((l) => l.assumed).length, nStarted = legs.filter((l) => l.started).length;
   const E = S.slipEval;
   if (E && E.n) {
@@ -2039,6 +2101,7 @@ function renderSlip() {
       <div class="kv"><span class="k">${legs.length > 1 ? `${inCents() ? "Combined price" : "Parlay odds"} (${nAssumed ? "estimate" : inCents() ? "from sportsbook odds" : "standard"})` : nAssumed ? `${priceWord()} (assumed)` : inCents() ? "Sportsbook price" : "Odds"}</span><span class="v">${fmtOdds(E.odds)}</span></div>
       <div class="kv"><span class="k">${legs.length > 1 ? "Chance every pick wins" : "Win chance"}</span><span class="v">${pct(E.p_win_all)}${E.p_hit - E.p_win_all > 0.005 ? ` <span class="muted" style="font-weight:400">+${pct(E.p_hit - E.p_win_all)} push</span>` : ""}</span></div>
       <div class="kv" title="${inCents() ? "Only buy for less than this" : "Only bet if your sportsbook pays more than this"}"><span class="k">Fair ${inCents() ? "price" : "odds"} (break-even)</span><span class="v">${fmtOdds(E.fair_odds)}</span></div>
+      ${Object.keys(slipLinesNow()).some((k) => alts[k] && alts[k].priced) ? `<div class="hint">A pick above is priced at <b>your line</b>, not the tool's. The ${inCents() ? "price" : "odds"} the tool shows belong to its own line, so type the ${inCents() ? "price or payout" : "odds"} your ${inCents() ? "app" : "sportsbook"} gives for yours.</div>` : ""}
       ${nStarted ? `<div class="hint"><b>${nStarted === legs.length ? (legs.length === 1 ? "This game has" : "These games have") : `${nStarted} of these picks are from games that have`} started.</b> The odds and chances shown are the last ones before the start. Check each line matches the one you bet, type the odds from your slip, and record it: the Live page takes over from there.</div>` : ""}
       ${nAssumed ? `<div class="hint"><b>${nAssumed === legs.length ? (legs.length === 1 ? "This pick has" : "These picks have") : `${nAssumed} of these picks ${nAssumed === 1 ? "has" : "have"}`} no price in the feed.</b> The odds shown assume ${assumedOdds()} for each, a typical price. Type the real odds from your sportsbook's slip below before trusting the return.</div>` : ""}
       ${E.same_game ? `<div class="hint">These picks are from the same game and win together ×${num(E.lift, 2)} as often as unrelated picks would. Your sportsbook prices same-game parlays itself, so type in the odds it offers.</div>` : ""}
@@ -2098,9 +2161,10 @@ function updateSlipCalc() {
   if (sp.payout != null && stake > 0) html += `<div class="kv"><span class="k">Pays if it wins</span><span class="v">${money(sp.payout, 2)}</span></div>`;
   // a bet on a game that has started, or at a line other than the tool's: the chance above is not for this bet
   const legs = S.slip.map((k) => S.legs[k]).filter(Boolean);
-  const offLine = legs.some((l) => l.started || (S.slipLines[l.key] != null && l.line != null && Math.abs(parseFloat(S.slipLines[l.key]) - l.line) > 1e-9));
+  const moved = slipLinesNow(), alts = E.alts || {};
+  const offLine = legs.some((l) => l.started || (moved[l.key] != null && !(alts[l.key] && alts[l.key].priced)));
   if (offLine) {
-    box.innerHTML = `${html}<div class="hint">No verdict for this one: it has a game that has started or a line different from the tool's, so the chance shown above is not the chance of this exact bet. It can still be recorded and followed.</div>`;
+    box.innerHTML = `${html}<div class="hint">No verdict for this one: it has a game that has started${legs.some((l) => !l.started && moved[l.key] != null) ? ", or a line the tool could not price" : ""}, so the chance shown above is not the chance of this exact bet. It can still be recorded and followed.</div>`;
     return;
   }
   html += `<div class="kv"><span class="k">Expected return at ${inCents() ? "this price" : "these odds"}</span><span class="v ${cls(ev)}">${spct(ev)}${stake > 0 ? ` (${money(ev * (sp.spent || stake), 2)})` : ""}</span></div>`;
@@ -2278,9 +2342,7 @@ document.addEventListener("click", async (e) => {
     if (sp.from === "price" && !sp.contracts) { toast("That spend does not buy one contract at this price"); return; }
     const odds = sp.odds, stake = sp.spent;  // in cents only whole contracts are bought, so what was spent can be a little under what was typed
     try {
-      const lines = {};
-      for (const k of S.slip) { const v = parseFloat(S.slipLines[k]), l = S.legs[k]; if (l && !isNaN(v) && l.line != null && Math.abs(v - l.line) > 1e-9) lines[k] = v; }
-      await api("/api/bets", { method: "POST", body: JSON.stringify({ keys: S.slip, odds, stake, lines }) });
+      await api("/api/bets", { method: "POST", body: JSON.stringify({ keys: S.slip, odds, stake, lines: slipLinesNow() }) });
       toast("Recorded. Follow it on the Live page.");
       S.live = null; S.odds = null;
       S.slip = []; saveSlip(); S.slipEval = null; S.slipStake = null; S.track = null; S.slipLines = {}; S.importNote = null; S.slipPayout = ""; S.importSingles = null;
@@ -2350,7 +2412,7 @@ document.addEventListener("input", (e) => {
     clearTimeout(window._co); window._co = setTimeout(() => checkOffer(id, true), 350);
     return;
   }
-  if (t.id === "slipOdds") { S.slipOdds = t.value; updateSlipCalc(); return; }
+  if (t.id === "slipOdds") { S.slipOdds = t.value; S.slipOddsTyped = true; updateSlipCalc(); return; }
   if (t.dataset.lineKey) { S.slipLines[t.dataset.lineKey] = t.value; updateSlipCalc(); return; }
   if (t.id === "impText") { S.importText = t.value; return; }
   if (t.dataset.px) {
@@ -2373,8 +2435,20 @@ document.addEventListener("input", (e) => {
   }
 });
 
-document.addEventListener("change", (e) => {
+document.addEventListener("change", async (e) => {
   const t = e.target;
+  if (t.dataset.lineKey) {
+    S.slipLines[t.dataset.lineKey] = t.value;
+    const kept = S.slipOdds, typed = S.slipOddsTyped;
+    await evalSlip();
+    // A price the user typed stays. The tool's own price belongs to its own line, so once a pick is taken at
+    // another line the box is emptied rather than left judging the bet at a price that is not for it.
+    const priced = Object.keys(slipLinesNow()).length > 0;
+    S.slipOdds = typed ? kept : priced ? "" : S.slipOdds;
+    S.slipOddsTyped = typed;
+    renderSlip();
+    return;
+  }
   if (t.dataset.jump && t.value) { const el = document.getElementById(t.value); t.value = ""; if (el) el.scrollIntoView({ block: "start", behavior: "smooth" }); return; }
   if (t.dataset.bindPlay === "game") { S.parlayGame = t.value; renderMain(); return; }
   if (t.dataset.pgjump && t.value) { const id = t.value; S.pgOpen = { ...(S.pgOpen || {}), [id]: true }; S.focusGame = `pg-${id.replace("|", "-")}`; renderMain(); return; }
