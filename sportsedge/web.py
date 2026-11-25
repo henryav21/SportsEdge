@@ -24,7 +24,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import access, config, engine, live, markets, oddslog, parlay, sources, tracker
+from . import access, betmoves, config, engine, live, markets, oddslog, parlay, sources, tracker
 from .util import norm_name
 
 UI_DIR = Path(__file__).resolve().parent / "ui"
@@ -240,11 +240,59 @@ def check_odds() -> int:
             continue
         if up.empty:
             continue
-        changed += oddslog.record(sport, up)
+        changed += oddslog.record(sport, up[up["state"] == "pre"])  # pre-game numbers only: never an in-play line
         for g in up[up["state"] == "pre"].itertuples():
             feed[(sport, g.home, g.away)] = {k: (None if pd.isna(getattr(g, k)) else float(getattr(g, k))) for k in oddslog.FIELDS}
     STATE.update(checked_at=dt.datetime.now().isoformat(timespec="seconds"), feed=feed, changes=STATE["changes"] + changed)
+    _bet_moves()  # keep the last number seen for each recorded pick up to date, whether or not anyone is looking
     return changed
+
+
+# ============================================================================= recorded bets against the line now
+def _game_line(sport: str, leg: dict) -> dict | None:
+    """The line to compare a game pick with: the user's own correction if there is one, otherwise the newest
+    numbers from the feed, otherwise the ones the picks were priced at."""
+    for r in STATE["results"]:
+        games = r.get("games")
+        if r["sport"] != sport or games is None or games.empty:
+            continue
+        hit = games[games["game_id"].astype(str) == str(leg.get("game_id"))]
+        if hit.empty:
+            continue
+        g = hit.iloc[0]
+        if bool(g.get("edited")):
+            return g["line"]
+        return STATE["feed"].get((sport, g["home"], g["away"])) or g["line"]
+    return None
+
+
+def _leg_now(leg: dict) -> dict | None:
+    """A recorded pick's number right now, or None when there is nothing newer to compare it with."""
+    sport = str(leg.get("sport", "")).lower()
+    if leg.get("market_key") in betmoves.GAME_MARKETS:
+        return betmoves.game_now(leg, _game_line(sport, leg))
+    fresh = STATE["legs"].get(leg.get("key"))
+    if fresh is not None:
+        if fresh.get("book") in ("manual", "corrected"):  # a number the user typed in is not a newer reading of the market
+            return None
+        return {"line": fresh.get("line"), "odds": fresh.get("odds"), "p_fair": fresh.get("p_fair")}
+    for r in STATE["results"]:  # a prop that arrives as a line without prices
+        if r["sport"] != sport:
+            continue
+        for pl in r.get("prop_lines") or []:
+            if (str(pl.get("game_id")) == str(leg.get("game_id")) and pl.get("player_key") == leg.get("player_key")
+                    and pl.get("market_key") == leg.get("market_key")):
+                return {"line": pl.get("line"), "odds": None, "p_fair": None}
+    return None
+
+
+def _bet_moves(bets: pd.DataFrame | None = None) -> dict:
+    """{bet id: {pick key: movement since the bet}} for every recorded bet."""
+    try:
+        return betmoves.update(tracker.load_bets() if bets is None else bets, _leg_now)
+    except Exception as e:  # an extra: it must never break the page or the odds check
+        _log(f"Movement since your bets skipped: {e!r}")
+        return {}
 
 
 def _stale_games() -> int:
@@ -492,7 +540,14 @@ def _live_context() -> tuple[dict, dict]:
 def api_live():
     """Every open bet as it stands right now."""
     sd, legs = _live_context()
-    bets = live.open_bets(tracker.load_bets(), sd, legs)
+    recorded = tracker.load_bets()
+    bets = live.open_bets(recorded, sd, legs)
+    moves = _bet_moves(recorded)
+    for b in bets:  # how the sportsbook's number for each pick has moved since the bet was recorded
+        mine = moves.get(str(b.get("id"))) or {}
+        for v in b.get("legs") or []:
+            v["move"] = mine.get(str(v.get("key")))
+        b["moves"] = betmoves.tally(mine)
     try:
         scores = live.scores()
     except Exception:  # the scoreboard is an extra: never let it take the bets down with it
@@ -557,7 +612,22 @@ def api_odds():
         counts[sport] = len(mine)
         top += mine[:45]
     top.sort(key=size)
+    recorded, mine = tracker.load_bets(), []
+    moves = _bet_moves(recorded)
+    for b in (recorded[recorded["status"] == "open"].to_dict(orient="records") if not recorded.empty else []):
+        try:
+            blegs = json.loads(b["legs_json"])
+        except (TypeError, ValueError):
+            continue
+        mv = moves.get(str(b["id"])) or {}
+        mine.append({"id": b["id"], "n": len(blegs), "stake": b["stake"], "odds": b["odds"], "placed_at": b["placed_at"],
+                     "tally": betmoves.tally(mv),
+                     "legs": [{"key": l.get("key"), "selection": l.get("selection"), "sport": l.get("sport"),
+                               "game": f"{l.get('away')} @ {l.get('home')}", "game_id": l.get("game_id"), "market_key": l.get("market_key"),
+                               "start": l.get("start"),
+                               "started": betmoves.started(l), "move": mv.get(str(l.get("key")))} for l in blegs]})
     return clean({"games": games, "props": top, "prop_moves": len(props), "prop_moves_by_sport": counts, "checked_at": STATE["checked_at"],
+                  "bets": mine,
                   "check_minutes": config.ODDS_CHECK_MINUTES, "auto_update_minutes": config.AUTO_UPDATE_MINUTES,
                   "stale_games": _stale_games(), "log_rows": int(len(log)),
                   "log_since": None if log.empty else str(log["ts"].min())})

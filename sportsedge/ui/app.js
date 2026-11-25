@@ -931,6 +931,36 @@ async function loadLive() {
   liveTimer = setTimeout(loadLive, S.live && S.live.in_play ? 30000 : 120000);
 }
 
+/* A recorded pick against the sportsbook's number for it now, in words: which way it has gone, then the numbers. */
+const SINCE = {
+  for: ["▲ In your favour", "You hold a better number than the sportsbook offers now. Picks that beat the later line win more often than their price implied."],
+  against: ["▼ Against you", "The sportsbook now offers a better number than the one you took."],
+  same: ["= No real change", "The sportsbook's number for this pick is where it was when you bet."],
+};
+function sinceBet(m, mk) {
+  if (!m) return "";
+  const [tag, tip] = SINCE[m.verdict] || SINCE.same;
+  const ln = (x) => (mk === "spread" ? signed(x, Math.abs(x) % 1 ? 1 : 0) : lineNum(x));
+  const span = m.final ? "between your bet and the start of the game" : "since you bet";
+  const priced = m.odds_then != null && m.odds_now != null;
+  let what;
+  if (m.kind === "line" && m.verdict !== "same") {
+    const n = Math.abs(m.move), by = `${lineNum(n)}${mk === "spread" || mk === "total" ? ` point${n === 1 ? "" : "s"}` : ""}`;
+    what = `line ${ln(m.line_then)} → <b>${ln(m.line_now)}</b> ${span}: ${by} ${m.move > 0 ? "better" : "worse"} than ${m.final ? "the closing number" : "you would get now"}`;
+  } else if (m.kind === "line") {
+    what = `line still ${ln(m.line_now)} ${span}`;
+  } else {
+    const price = !priced ? "" : Math.abs(m.odds_then - m.odds_now) < 0.5 ? `price still ${fmtOdds(m.odds_now)}` : `price ${fmtOdds(m.odds_then)} → <b>${fmtOdds(m.odds_now)}</b>`;
+    what = [m.line_now != null ? `line still ${ln(m.line_now)}` : "", price].filter(Boolean).join(", ") + ` ${span}`;
+    if (m.verdict !== "same") what += `: the book rates this pick ${(Math.abs(m.move) * 100).toFixed(1)} points ${m.move > 0 ? "more" : "less"} likely`;
+  }
+  const extra = [m.other_book ? `set against ${esc(feedBook())}'s number` : "",
+    m.stale ? `last seen ${m.seen ? new Date(m.seen).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "earlier"}, not on the board right now` : ""].filter(Boolean).join(" · ");
+  return `<div class="since v-${m.verdict}"><span class="sv" title="${esc(tip)}">${tag}</span><span>${what}${extra ? ` <span class="muted">· ${extra}</span>` : ""}</span></div>`;
+}
+const feedBook = () => { for (const s of (S.slate ? S.slate.sports : [])) for (const l of s.legs) if (l.book && !["manual", "corrected"].includes(l.book)) return l.book; return "the feed's sportsbook"; };
+const tallyText = (t) => (!t ? "" : [t.for ? `${t.for} in your favour` : "", t.against ? `${t.against} against you` : "", t.same ? `${t.same} unchanged` : ""].filter(Boolean).join(" · "));
+
 const LEG_STATUS = {
   won: ["✓", "Won", "s-won"], lost: ["✕", "Lost", "s-lost"], push: ["=", "Push: this pick drops out", "s-void"],
   void: ["–", "Void: this pick drops out", "s-void"], live: ["●", "In play", "s-live"], pre: ["○", "Not started", "s-pre"],
@@ -946,7 +976,8 @@ function liveLeg(v) {
   const chance = v.decided ? "" : `<div class="lchance" title="Rough live estimate. Before the game it was ${pct(v.p_pre, 0)}.">${pct(v.p_now, 0)}<span class="muted"> chance now</span>${v.state === "in" ? `<div class="muted">was ${pct(v.p_pre, 0)}</div>` : ""}</div>`;
   return `<li class="lleg ${klass}"><span class="lic" title="${label}" aria-label="${label}">${icon}</span>
     <div class="lmain"><div class="pick">${esc(v.selection)}</div><div class="sub2">${esc(v.game)} · ${where}</div>
-      ${cur ? `<div class="lcur">${cur}</div>${bar}` : v.need ? `<div class="lcur">${esc(v.need)}</div>` : ""}</div>
+      ${cur ? `<div class="lcur">${cur}</div>${bar}` : v.need ? `<div class="lcur">${esc(v.need)}</div>` : ""}
+      ${sinceBet(v.move, v.market_key)}</div>
     ${v.decided ? `<span class="rate ${v.status === "won" ? "r-value" : v.status === "lost" ? "r-poor" : "r-fair"}">${label.split(":")[0]}</span>` : chance}</li>`;
 }
 
@@ -1078,6 +1109,23 @@ function moveCard(g, on) {
     </div></button>`;
 }
 
+/* Your recorded bets on the Line moves page: each pick with the way its line has gone since you placed it. */
+function myBetsMoves(bets) {
+  const head = `<div class="hd"><h2>Your bets and the line</h2><span class="sub">has the sportsbook's number moved your way since you bet?</span></div>`;
+  if (!bets.length) {
+    return `<section class="card">${head}<div class="empty"><b>No open bets recorded.</b> Record a bet from the bet slip and this shows, pick by pick, whether the line has moved in your favour or against you since you placed it.
+      Beating the later line is the earliest sign a pick was a good one, long before the game is played.</div></section>`;
+  }
+  const leg = (l) => `<li><div class="pick">${esc(l.selection)}</div>
+      <div class="sub2">${esc(l.game)} · ${l.started ? "started" : `starts ${when(l.start)}`}${["ml", "spread", "total"].includes(l.market_key) && !l.started ? ` · <button class="linkish" data-act="moves-game" data-id="${String(l.sport).toLowerCase()}|${esc(l.game_id)}">chart</button>` : ""}</div>
+      ${sinceBet(l.move, l.market_key) || `<div class="since v-none"><span class="sv">No comparison yet</span><span>${l.started ? "this tool had no number for it before the game started" : "the sportsbook's number has not been read again since you bet"}</span></div>`}</li>`;
+  return `<section class="card" id="sec-mybets">${head}<div class="bd"><div class="mybets">${bets.map((b) => `<article class="mybet">
+      <div class="mb-hd"><b>${b.n === 1 ? "Single bet" : `${b.n}-pick parlay`}</b><span class="muted">${money(b.stake, 2)} at ${fmtOdds(b.odds)}${b.placed_at ? ` · recorded ${new Date(b.placed_at).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" })}` : ""}</span></div>
+      ${tallyText(b.tally) ? `<div class="mb-tally">${tallyText(b.tally)}</div>` : ""}
+      <ul class="mb-legs">${b.legs.map(leg).join("")}</ul></article>`).join("")}</div>
+    <p class="note" style="margin:10px 0 0">Each pick is compared with the number the sportsbook's feed shows for it now. Once a game starts, the comparison stays at the last number seen before it.</p></div></section>`;
+}
+
 function pageMoves() {
   const head = pageHead("📈 Line moves", "How each game's numbers have moved since the sportsbook first posted them. A line that moves toward a pick after you take it is the earliest sign the pick was a good one. Opening numbers can be posted long before a game, so big moves since then are common.");
   if (!S.odds && !S.oddsErr) return `${head}<div class="empty"><span class="spinner"></span>Reading the lines ...</div>`;
@@ -1093,6 +1141,7 @@ function pageMoves() {
   const props = O.props.filter((p) => S.sport === "all" || p.sport === S.sport).slice(0, 60);
   const nPropMoves = S.sport === "all" ? O.prop_moves : (O.prop_moves_by_sport || {})[S.sport] || 0;
   const checked = O.checked_at ? new Date(O.checked_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "not yet";
+  const myBets = (O.bets || []).map((b) => ({ ...b, legs: b.legs.filter((l) => S.sport === "all" || String(l.sport).toLowerCase() === S.sport) })).filter((b) => b.legs.length);
   const stale = O.stale_games ? `<div class="banner warn"><span>The sportsbook's feed has moved on ${O.stale_games} game${O.stale_games === 1 ? "" : "s"} since the picks were last worked out. They update by themselves within ${O.auto_update_minutes} minutes, or do it now.</span><button class="btn small" data-act="refresh">Update now</button></div>` : "";
   const m = sel.move, o = sel.open || {}, n = sel.now || {};
   const box = (key, title, now, sub) => `<div class="cbox"><h3>${title}</h3><div class="cnow">${now}</div><div class="csub">${sub}</div><div class="chart" data-step="${key}"></div></div>`;
@@ -1110,6 +1159,7 @@ function pageMoves() {
     <div class="tile"><div class="label">Biggest total move</div><div class="value">${bigT && bigT.move.total ? `${bigT.move.total > 0 ? "▲" : "▼"} ${lineNum(Math.abs(bigT.move.total))}` : "–"}</div><div class="delta">${bigT && bigT.move.total ? `${esc(bigT.away)} @ ${esc(bigT.home)}: ${lineNum(bigT.open.total)} → ${lineNum(bigT.now.total)}` : "nothing has moved"}</div></div>
     <div class="tile"><div class="label">Prop lines moved</div><div class="value">${nPropMoves.toLocaleString()}</div><div class="delta">since they opened</div></div>
   </div>
+  ${myBets.length ? myBetsMoves(myBets) : ""}
   <section class="card" id="sec-chart"><div class="hd">${teamBadge(sel.sport, sel.away, true)}<h2>${esc(sel.away)} @ ${esc(sel.home)}</h2>${teamBadge(sel.sport, sel.home, true)}<span class="sub">${when(sel.start)} · pick another game below</span></div>
     <div class="bd"><div class="cgrid">
       ${box("total", "Total points (over / under)", lineNum(n.total), moveTxt(lineNum(o.total), m.total, lineNum))}
@@ -1123,7 +1173,8 @@ function pageMoves() {
   <section class="card"><div class="hd"><h2>Player prop lines that moved</h2><span class="sub">${props.length ? (props.length < nPropMoves ? `the ${props.length} biggest of ${nPropMoves.toLocaleString()}` : `${props.length} line${props.length === 1 ? "" : "s"}`) : "none yet"}</span></div>
     <div class="bd">${props.length ? `<div class="pm-list">${props.map((p) => `<div class="pm"><div class="pick">${esc(p.player)}</div>
         <div class="mvn">${p.move > 0 ? "▲" : "▼"} ${lineNum(Math.abs(p.move))}<small>${lineNum(p.open_line)} → ${lineNum(p.line)}</small></div>
-        <div class="sub2">${esc(p.market)} · ${esc(p.game)}</div></div>`).join("")}</div>` : '<div class="empty" style="padding-left:0">No prop line has moved since it opened.</div>'}</div></section>`;
+        <div class="sub2">${esc(p.market)} · ${esc(p.game)}</div></div>`).join("")}</div>` : '<div class="empty" style="padding-left:0">No prop line has moved since it opened.</div>'}</div></section>
+  ${myBets.length ? "" : myBetsMoves([])}`;
 }
 
 /* A line's history as a stepped line (a line holds until it changes), with the opening number dashed. */
@@ -1347,6 +1398,8 @@ function renderGuide() {
     <h3>Line moves</h3>
     <p>The <b>Line moves</b> page shows how each game's spread, total and moneyline have moved since the sportsbook first posted them, with a chart per game.
       The tool checks the feed every few minutes, logs every change, and reworks the picks by itself when a line has moved.</p>
+    <p>For a bet you have recorded, each pick also says whether its line has moved <b>in your favour</b> or <b>against you</b> since you placed it, on the Live and Line moves pages.
+      In your favour means you hold a better number than the sportsbook offers now: over many bets that is the best early sign of a good pick. One bet proves nothing either way.</p>
     <h3>If a line looks wrong</h3>
     <p>The tool reads sportsbook lines through ESPN's feed, which can be minutes or hours behind. If your sportsbook shows a different spread or total, open <b>Different at your sportsbook? Correct the line</b> on that game's card and type in the current numbers.
       For a player prop, use <b>Price a line from your sportsbook</b> on the Player props page. A pick is only as good as the line it was priced at.</p>
@@ -1767,7 +1820,7 @@ document.addEventListener("click", async (e) => {
   }
   if (act === "del-bet") {
     if (!confirm("Delete this bet record? This only removes it from your tracking.")) return;
-    try { await api(`/api/bets/${encodeURIComponent(a.dataset.id)}`, { method: "DELETE" }); toast("Deleted"); } catch (err) { toast(String(err.message || err)); }
+    try { await api(`/api/bets/${encodeURIComponent(a.dataset.id)}`, { method: "DELETE" }); toast("Deleted"); S.odds = null; } catch (err) { toast(String(err.message || err)); }
     S.track = null; renderMain(); return;
   }
   if (act === "record-bet") {
@@ -1776,7 +1829,7 @@ document.addEventListener("click", async (e) => {
     try {
       await api("/api/bets", { method: "POST", body: JSON.stringify({ keys: S.slip, odds, stake }) });
       toast("Recorded. Follow it on the Live page.");
-      S.live = null;
+      S.live = null; S.odds = null;
       S.slip = []; saveSlip(); S.slipEval = null; S.slipStake = null; S.track = null;
       renderSlip(); renderMain();
     } catch (err) { toast(String(err.message || err)); }

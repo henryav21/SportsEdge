@@ -32,7 +32,8 @@ PARLAY_COLS = ["key", "logged_at", "mode", "date", "legs", "legs_json", "n", "od
                "ev", "lift", "status", "pnl", "graded_at"]
 LEG_FIELDS = ["key", "sport", "game_id", "date", "home", "away", "market_key", "side", "player_key", "line", "dec"]
 EXPIRE_DAYS = 10  # an open pick with no official result after this long is voided
-BET_LEG_EXTRA = ["selection", "subject", "market", "odds", "p_cond", "p_push", "proj", "start"]
+# p_fair and book are kept so that later line movement can be measured against the number the bet was made at
+BET_LEG_EXTRA = ["selection", "subject", "market", "odds", "p_cond", "p_push", "proj", "start", "p_fair", "book"]
 
 NFL_STAT = {"pass_yds": ["passing_yards"], "pass_tds": ["passing_tds"], "pass_cmp": ["completions"],
             "pass_att": ["attempts"], "rush_yds": ["rushing_yards"], "rush_att": ["carries"],
@@ -133,6 +134,14 @@ def log_slate(results: list[dict], parlays: dict) -> int:
 
 
 def _jsonable(v):
+    """One field of a pick in a form that can be written as JSON. NFL kick-off times arrive as timestamps,
+    NBA ones as text: both are stored as ISO text."""
+    if v is None or v is pd.NaT:
+        return None
+    if isinstance(v, (pd.Timestamp, dt.datetime, dt.date)):
+        return v.isoformat()
+    if isinstance(v, (np.bool_, bool)):
+        return bool(v)
     if isinstance(v, (np.floating, float)):
         return None if np.isnan(v) else float(v)
     if isinstance(v, np.integer):

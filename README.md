@@ -36,7 +36,7 @@ odds, injuries and weather and reruns everything. While it is open it also looks
 | **Today** | Value bets and most-likely picks as cards (each with its win chance as a ring), suggested parlays, then every game as one block laid out like a sportsbook: the two teams with moneyline, over/under and spread, how far the line has moved since it opened, and that game's player props underneath, with chips to switch stat. Games are grouped by day. |
 | **Player props** | Every prop line, **by game** (each game a section, grouped by stat or by player) or as a **ranked list** across all games (most likely, value, biggest disagreements). Also the test results for the prop simulator, a form to price a line from your own sportsbook, and the full projection table. |
 | **Live** | Every bet you recorded as it stands right now, pick by pick, with real scores and stat lines, what the bet is worth, and a check on your sportsbook's cash-out offer. Below that, today's scoreboard: every game's score and clock, and ESPN's live win chance for games in play. |
-| **Line moves** | How each game's spread, total and moneyline have moved since the sportsbook first posted them: a chart per number for the game you pick, every game ranked by how far it has moved, and the player prop lines that moved most. |
+| **Line moves** | How each game's spread, total and moneyline have moved since the sportsbook first posted them: a chart per number for the game you pick, every game ranked by how far it has moved, and the player prop lines that moved most. Also whether the line for each pick in your recorded bets has moved in your favour or against you. |
 | **Results** | How logged picks have done: units won over time, a chart of predicted vs actual win rates, results by list and bet type, closing-line value, and **My bets**. |
 | **How it works** | The steps behind a pick, the game model's record against closing lines, the prop simulator's record against real lines, and every factor's learned weight. |
 
@@ -72,6 +72,12 @@ prop straight away. Opening numbers can be posted long before a game, so big mov
   full update is at least 12 minutes old (`AUTO_UPDATE_MINUTES`), the picks are reworked automatically.
 - A spread is described by the team it moved toward: "−1.5 → −8.5, toward DAL" means DAL became a bigger
   favourite.
+- **Your bets and the line.** For every bet you record, each pick is compared with the sportsbook's number
+  for it now, on the Live and Line moves pages: **in your favour** (you hold a better number than is on
+  offer now), **against you**, or **no real change**. A moved line is measured in points or the stat's own
+  units. An unmoved line is judged on its price, as the change in the pick's chance with the fee removed.
+  Once the game starts the comparison stays at the last number seen before it (`history/bet_lines.json`),
+  which is the bet's closing-line value as near to the close as the dashboard looked.
 
 ## Live tracking and cashing out
 
@@ -297,6 +303,7 @@ edge to flag, and the seasons used.
 | `tracker.py` | Logs picks and your bets, settles them, closing-line value, learned prop weight |
 | `live.py` | Live scores and stat lines for open bets, live chances, cash-out check, today's scoreboard |
 | `oddslog.py` | Line movement: opening numbers, the log of every change, movement since open |
+| `betmoves.py` | Each recorded pick against the sportsbook's number for it now, kept up to the start of the game |
 | `web.py`, `ui/` | Local dashboard: API server plus a plain HTML/JS page (no build step) |
 | `access.py`, `share.py`, `remote/` | Passcode gate, and the tunnel plus Vercel address for reaching it from anywhere |
 | `backtest.py`, `report.py`, `cli.py` | Evaluation and output |
