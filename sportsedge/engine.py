@@ -120,7 +120,7 @@ def run_sport(sport: str, days: int = 1, props_csv: str | None = None, props: bo
     prop_sims = {}
     prop_book = ""
     prop_centre = {"*": 0.0}
-    prop_ref, prop_only, prop_check = {}, [], None
+    prop_ref, prop_only, prop_check, lean = {}, [], None, []
     if props:
         # your own lines first, then The Odds API, then the free ESPN feed; one line per player and market
         lines = []
@@ -167,6 +167,8 @@ def run_sport(sport: str, days: int = 1, props_csv: str | None = None, props: bo
             unpriced = ln[ln["over_odds"].isna() & ln["under_odds"].isna()]
             prop_only = markets.prop_leans(sport, unpriced, prop_sims, slate.assign(start=slate["start"]),
                                            pmod.MARKET_LABEL, prop_centre)
+            lean = markets.lean_legs(sport, unpriced, prop_sims, slate.assign(start=slate["start"]),
+                                     pmod.MARKET_LABEL, prop_centre)
             pl = markets.prop_legs(sport, ln, prop_sims, slate.assign(start=slate["start"]), pmod.MARKET_LABEL,
                                    prop_centre)
             legs += pl
@@ -187,6 +189,8 @@ def run_sport(sport: str, days: int = 1, props_csv: str | None = None, props: bo
     return {"sport": sport, "games": games, "legs": legs, "proj": proj, "model": summary,
             # kept so the UI can price parlays / new prop lines without re-simulating
             "prop_book": prop_book, "prop_centre": prop_centre, "prop_ref": prop_ref, "prop_lines": prop_only,
+            # unpriced props as picks at an assumed price: for the bet slip and the suggested parlays only
+            "lean_legs": lean,
             "prop_check": prop_check,
             # kept so one game can be re-priced when the user corrects a line the feed has not caught up with
             "_model": model, "_sims": sims, "_feed_rows": feed_rows, "_feed_odds": feed_odds,

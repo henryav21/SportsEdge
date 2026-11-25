@@ -33,9 +33,9 @@ odds, injuries and weather and reruns everything. While it is open it also looks
 
 | Page | What's there |
 |---|---|
-| **Today** | Value bets and most-likely picks as cards (each with its win chance as a ring), suggested parlays, then every game as one block laid out like a sportsbook: the two teams with moneyline, over/under and spread, how far the line has moved since it opened, and that game's player props underneath, with chips to switch stat. Games are grouped by day. |
+| **Today** | Value bets and most-likely picks as cards (each with its win chance as a ring), the best parlays by day, group of games and game, then every game as one block laid out like a sportsbook: the two teams with moneyline, over/under and spread, how far the line has moved since it opened, the game's **top picks**, and its player props underneath, with chips to switch stat. Games that have started sit in their own block with the live score, so a bet already placed can still be recorded. |
 | **Player props** | Every prop line, **by game** (each game a section, grouped by stat or by player) or as a **ranked list** across all games (most likely, value, biggest disagreements). Also the test results for the prop simulator, a form to price a line from your own sportsbook, and the full projection table. |
-| **Live** | Every bet you recorded as it stands right now, pick by pick, with real scores and stat lines, what the bet is worth, and a check on your sportsbook's cash-out offer. Below that, today's scoreboard: every game's score and clock, and ESPN's live win chance for games in play. |
+| **Live** | Every bet you recorded as it stands right now, pick by pick, with real scores and stat lines, what the bet is worth, and a check on your sportsbook's cash-out offer. Below that, today's scoreboard: every game's score and clock, ESPN's live win chance for games in play, and every player's stats so far. |
 | **Line moves** | How each game's spread, total and moneyline have moved since the sportsbook first posted them: a chart per number for the game you pick, every game ranked by how far it has moved, and the player prop lines that moved most. Also whether the line for each pick in your recorded bets has moved in your favour or against you. |
 | **Results** | How logged picks have done: units won over time, a chart of predicted vs actual win rates, results by list and bet type, closing-line value, and **My bets**. |
 | **How it works** | The steps behind a pick, the game model's record against closing lines, the prop simulator's record against real lines, and every factor's learned weight. |
@@ -60,6 +60,34 @@ run behind the sportsbook. Check the line against your sportsbook before betting
 - For a prop, use **Price a line from your sportsbook** and say where the line is from. A DraftKings
   line that moved replaces the tool's copy and is priced on its own odds. A line from another
   sportsbook is compared with the DraftKings line, so a line or price that is out of step shows as an edge.
+
+## Top picks and suggested parlays
+
+Each game lists its **top picks**: one side of each bet, one pick per player, best expected return for the
+price first. The **Parlays** section then gives the best parlay for each **day**, each **group of games**
+(one sport's games starting within 90 minutes of each other) and each **game**, at three sizes of payout:
+Safer (about +100 to +300), Balanced (+300 to +800) and Long shot (+800 and up).
+
+- **What "best" means.** A parlay priced from its picks' own odds returns the product of what each pick
+  returns. So for a payout of a given size, the best parlay is the one whose picks give up the least to the
+  sportsbook (or gain the most). That is how each band is filled, which gets the most odds the picks can
+  justify. Choosing by payout alone would just choose the longest odds on the board.
+- **Across games, no more than two picks come from one game**, so one game cannot sink the bet alone.
+- **Fair odds are the number to check.** Every added pick lowers the chance to hit. Bet a parlay when your
+  slip pays more than its fair odds.
+- **The payout is marked as an estimate in two cases.** Picks from the same game get their own price from
+  the sportsbook, usually below the separate-pick price when the picks tend to win together. And NFL props
+  reach the tool without prices: they are shown as a **lean**, never as value, at an assumed standard price
+  (`ASSUMED_PROP_ODDS`, −115) until you type in the odds from your slip. Their chance is the tested blend:
+  the simulator against an even bet, at the weight the prop test gave the simulator.
+
+## Recording a bet after the game has started
+
+The slate only holds games still to come, because a started game's prices are no longer on offer. A game
+that has started moves to **Started games** on the Today page, with the live score, each player's number
+so far, and every pick at the last line and price logged before the start. Tap the picks you bet, type the
+odds from your sportsbook's slip, change a line in the slip if yours was different, and record it. The Live
+page then follows the bet like any other.
 
 ## Line moves
 
@@ -299,6 +327,7 @@ edge to flag, and the seasons used.
 | `nfl_props.py`, `nba_props.py` | Player-prop simulators |
 | `propcheck.py` | Replays the prop simulators on real past lines and learns their weight |
 | `markets.py`, `parlay.py` | Pricing, market centring, EV, Kelly, parlay search |
+| `plays.py` | Top picks per game and the best parlays per game, group of games and day |
 | `sources.py` | ESPN (schedule, odds, prop lines, injuries), Open-Meteo, The Odds API |
 | `tracker.py` | Logs picks and your bets, settles them, closing-line value, learned prop weight |
 | `live.py` | Live scores and stat lines for open bets, live chances, cash-out check, today's scoreboard |

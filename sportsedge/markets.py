@@ -159,6 +159,47 @@ def prop_centre(lines: pd.DataFrame, prop_sims: dict) -> dict:
     return out
 
 
+def lean_legs(sport: str, lines: pd.DataFrame, prop_sims: dict, games: pd.DataFrame, labels: dict,
+              centre: dict) -> list[dict]:
+    """Both sides of every line that came without a price, as picks that can go in a bet slip.
+
+    The chance is the tested blend: the simulator against an even bet at that line, with the weight the prop
+    test gave the simulator. The price is an assumed standard one (config.ASSUMED_PROP_ODDS) and each pick is
+    marked `assumed`. They are kept apart from the priced picks: never rated as value and never logged as
+    priced picks, because nothing here knows what the sportsbook is really charging."""
+    where = _locate(prop_sims)
+    ginfo = games.set_index("game_id")
+    from .tracker import prop_weight as _learned  # lazy: tracker reads the graded history
+
+    wp, odds = _learned(sport), float(config.ASSUMED_PROP_ODDS)
+    legs = []
+    for r in lines.itertuples():
+        gid = where.get(r.key)
+        if gid is None or r.market == "anytime_td" or r.market not in prop_sims[gid][r.key] or pd.isna(r.line):
+            continue
+        x = prop_sims[gid][r.key][r.market]
+        g = ginfo.loc[gid]
+        line = float(r.line)
+        pp = float(np.mean(x == line))
+        pc = float(np.mean(x > line)) / max(1 - pp, 1e-9)
+        pc = float(_sigmoid(_logit(pc) + centre.get(r.market, centre.get("*", 0.0))))
+        po = (wp * pc + (1 - wp) * 0.5) * (1 - pp)
+        pu = (wp * (1 - pc) + (1 - wp) * 0.5) * (1 - pp)
+        label = labels.get(r.market, r.market)
+        flag = "simulator far from market: check news" if abs(pc - 0.5) >= PROP_GAP_FLAG else ""
+        base = {**_base(sport, gid, g.home, g.away, g.start, r.player, getattr(r, "book", "")),
+                "proj_med": float(np.median(x)), "sim_over": pc, "open_line": _opt(r, "open_line"), "assumed": True}
+        common = dict(line=line, proj=float(np.mean(x)), flag=flag, market_key=r.market, player_key=r.key)
+        grp = f"{gid}|{r.key}|{r.market}"
+        over = _leg(base, f"{r.player} o{line:g} {label}", label, grp, odds, po, pp, pc * (1 - pp), 0.5,
+                    _result(x > line, x == line), side="over", **common)
+        under = _leg(base, f"{r.player} u{line:g} {label}", label, grp, odds, pu, pp, (1 - pc) * (1 - pp), 0.5,
+                     _result(x < line, x == line), side="under", **common)
+        over["lean"], under["lean"] = pc - 0.5, 0.5 - pc  # how far the simulator is from an even bet, toward this side
+        legs += [over, under]
+    return legs
+
+
 def _opt(r, name):
     """An optional column of a line row as a float, or None when it is absent or empty."""
     v = getattr(r, name, None)

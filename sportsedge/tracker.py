@@ -133,6 +133,52 @@ def log_slate(results: list[dict], parlays: dict) -> int:
     return len(rows)
 
 
+STARTED_HOURS = 14.0  # a game that started longer ago than this is over and settled, or stale
+
+
+def started_legs(hours: float = STARTED_HOURS, now: pd.Timestamp | None = None) -> list[dict]:
+    """The last number logged before the start, for every pick of a game that has started and is not yet
+    settled. The slate only holds games still to come, so this is what lets a bet be recorded after tip-off:
+    the pick at the line and price it had when the game began."""
+    picks = load_picks()
+    if picks.empty:
+        return []
+    now = now or pd.Timestamp.now(tz="UTC")
+    t = pd.to_datetime(picks["start"], utc=True, errors="coerce")
+    live = picks[(picks["status"] == "open") & (t <= now) & (t >= now - pd.Timedelta(hours=hours))]
+    text = ["key", "sport", "game_id", "date", "game", "home", "away", "market", "market_key", "side", "player_key",
+            "subject", "selection", "book"]
+    nums = ["line", "odds", "dec", "p_win", "p_push", "p_cond", "p_fair", "proj"]
+    out = []
+    for r, start in zip(live.to_dict("records"), t[live.index]):
+        l = {k: ("" if r.get(k) is None or pd.isna(r.get(k)) else str(r.get(k))) for k in text}
+        l.update({k: _jsonable(r.get(k)) for k in nums})
+        if l["dec"] is None or l["p_win"] is None:
+            continue
+        mk = l["market_key"]
+        l.update(start=start.isoformat(), p_push=l["p_push"] or 0.0, flag="", started=True, result=None,
+                 # the two sides of one bet share a group, so both cannot go in the same slip
+                 group=f"{l['game_id']}|{l['player_key']}|{mk}" if l["player_key"] else f"{l['game_id']}|{'total' if mk == 'total' else 'side'}")
+        out.append(l)
+    return out
+
+
+def with_line(leg: dict, line: float) -> dict:
+    """The same pick at a different line: for recording a bet whose line at the sportsbook was not the one
+    the tool had. Only the line and the pick's name change; the chance is left as it was."""
+    mk, side = leg.get("market_key"), leg.get("side")
+    if leg.get("line") is None or pd.isna(leg.get("line")) or mk == "ml":
+        return leg
+    line = float(line)
+    if mk == "total":
+        name = f"{'Over' if side == 'over' else 'Under'} {line:g}"
+    elif mk == "spread":
+        name = f"{leg.get('home') if side == 'home' else leg.get('away')} {line:+g}"
+    else:
+        name = f"{leg.get('subject')} {'o' if side == 'over' else 'u'}{line:g} {leg.get('market')}"
+    return {**leg, "line": line, "selection": name}
+
+
 def _jsonable(v):
     """One field of a pick in a form that can be written as JSON. NFL kick-off times arrive as timestamps,
     NBA ones as text: both are stored as ISO text."""

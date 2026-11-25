@@ -166,6 +166,14 @@ class BetAsItStands(unittest.TestCase):
         self.assertGreater(x["p_push"], 0.05)
         self.assertAlmostEqual(v["value"], 10 * 1.909 * x["p_now"] + 10 * x["p_push"], places=6)  # win pays in full, a push returns the stake
 
+    def test_an_nba_player_missing_from_the_box_score_is_not_written_off(self):
+        l = leg("pts", "over", 22.5, p=0.5, pkey="absent", proj=24.0)
+        v = self._view([l], {l["key"]: game("in", period=3, clock=400, home=60, away=50)}, {"players": {"other": {"pts": 15.0}}, "home_wp": 0.6})
+        x = v["legs"][0]
+        self.assertEqual((x["status"], x["decided"]), ("live", False))
+        self.assertIn("not in the box score", x["need"])
+        self.assertAlmostEqual(x["p_now"], 0.5)  # his chance stays where it was, rather than falling as if he had scored nothing
+
     def test_an_over_already_reached_is_decided_before_the_final_whistle(self):
         l = leg("reb", "over", 9.5, pkey="big", proj=10)
         v = self._view([l], {l["key"]: game("in", period=2, clock=100)}, {"players": {"big": {"reb": 11.0}}, "home_wp": None})

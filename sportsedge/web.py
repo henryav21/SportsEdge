@@ -17,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from starlette.middleware.gzip import GZipMiddleware
 from urllib.parse import parse_qs
 
 from fastapi import FastAPI, HTTPException, Request
@@ -24,7 +25,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import access, betmoves, config, engine, live, markets, oddslog, parlay, sources, tracker
+from . import access, betmoves, config, engine, live, markets, oddslog, parlay, plays, sources, tracker
 from .util import norm_name
 
 UI_DIR = Path(__file__).resolve().parent / "ui"
@@ -118,9 +119,12 @@ def logout():
     return resp
 
 
+# the slate is half a megabyte of JSON: compressed it is about a tenth of that, which matters on a phone
+app.add_middleware(GZipMiddleware, minimum_size=2000)
+
 LOCK = threading.Lock()
 STATE: dict = {"status": "idle", "log": [], "error": None, "run_at": None, "started_at": None,
-               "results": [], "legs": {}, "parlays": {}, "params": {},
+               "results": [], "legs": {}, "parlays": {}, "plays": {}, "params": {},
                # lines the user corrected by hand: (sport, game_id) -> {"change": {...}, "feed": {...}}
                "overrides": {},
                # the automatic odds check: when it last ran, and what the feed showed then
@@ -185,7 +189,8 @@ def _run(sports: list[str], days: dict, props: bool, track: bool):
             except Exception as e:  # tracking must never block the slate
                 _log(f"Tracking skipped: {e!r}")
         with LOCK:
-            STATE.update(results=results, legs={l["key"]: l for l in legs}, parlays=parlays, status="ready",
+            STATE.update(results=results, legs={l["key"]: l for l in _every_leg(results)}, parlays=parlays,
+                         plays=_suggestions(results), status="ready",
                          run_at=dt.datetime.now().isoformat(timespec="seconds"), error=None)
         try:
             check_odds()
@@ -225,6 +230,44 @@ def _load_overrides():
 def _feed_line(res: dict, game_id) -> dict:
     o = res["_feed_odds"][game_id]
     return {k: (None if o.get(k) is None or pd.isna(o.get(k)) else float(o.get(k))) for k in ("spread_home", "total")}
+
+
+# ============================================================================= every pick, and the suggestions
+def _every_leg(results: list[dict]) -> list[dict]:
+    """Priced picks plus the unpriced props at their assumed price. Where both exist for one bet (a prop the
+    user priced from their own sportsbook), the priced one is kept."""
+    priced = [l for r in results for l in r["legs"]]
+    have = {l["key"] for l in priced}
+    return priced + [l for r in results for l in r.get("lean_legs") or [] if l["key"] not in have]
+
+
+def _suggestions(results: list[dict]) -> dict:
+    try:
+        return plays.build(_every_leg(results))
+    except Exception as e:  # suggestions are an extra: the slate must still load without them
+        _log(f"Suggestions skipped: {e!r}")
+        return {}
+
+
+_STARTED: dict = {"at": 0.0, "legs": {}}
+
+
+def _started() -> dict:
+    """key -> pick, for games that have started and are not settled, at their last number before the start.
+    Read from the pick history at most once a minute. A pick the slate still holds is left to the slate."""
+    if time.time() - _STARTED["at"] > 60:
+        try:
+            _STARTED.update(at=time.time(), legs={l["key"]: l for l in tracker.started_legs()})
+        except Exception as e:
+            _log(f"Started games skipped: {e!r}")
+            _STARTED.update(at=time.time(), legs={})
+    return {k: l for k, l in _STARTED["legs"].items() if k not in STATE["legs"]}
+
+
+def _picks(keys: list[str]) -> list[dict]:
+    """The picks for these keys: from the slate, or for a game that has started, from its last number."""
+    late = _started()
+    return [STATE["legs"].get(k) or late[k] for k in keys if k in STATE["legs"] or k in late]
 
 
 # ============================================================================= automatic odds check
@@ -388,6 +431,7 @@ class BetReq(BaseModel):
     odds: float
     stake: float
     note: str = ""
+    lines: dict[str, float] = {}  # pick key -> the line the bet was really made at, where it differs
 
 
 @app.get("/")
@@ -427,6 +471,17 @@ def api_status(request: Request = None):
             "has_passcode": access.has_passcode() if not remote else True}
 
 
+# what the page needs of a prop that has no price: enough to list it, add it to the slip and record it
+LEAN_FIELDS = ["key", "sport", "game_id", "game", "home", "away", "start", "date", "subject", "book", "selection", "market",
+               "market_key", "side", "player_key", "group", "line", "odds", "dec", "p_win", "p_push", "p_cond", "ev", "proj",
+               "proj_med", "sim_over", "lean", "flag", "assumed"]
+
+
+STARTED_FIELDS = ["key", "sport", "game_id", "game", "home", "away", "start", "date", "subject", "book", "selection",
+                  "market", "market_key", "side", "player_key", "group", "line", "odds", "dec", "p_win", "p_push", "p_cond",
+                  "proj", "started"]
+
+
 @app.get("/api/slate")
 def api_slate():
     out = {"run_at": STATE["run_at"], "sports": [], "parlays": {}, "settings": {
@@ -446,12 +501,24 @@ def api_slate():
                               "prop_check": clean(r.get("prop_check"))})
     for mode, df in (STATE["parlays"] or {}).items():
         out["parlays"][mode] = records(df) if df is not None else []
+    # suggested picks and parlays, with the assumed-price picks they use (the priced ones are listed above)
+    # games that have started: their picks at the last number before the start, so a bet can still be recorded
+    late: dict = {}
+    for l in _started().values():
+        g = late.setdefault((l["sport"], l["game_id"]), {"sport": l["sport"].lower(), "game_id": l["game_id"], "game": l["game"],
+                                                         "home": l["home"], "away": l["away"], "start": l["start"], "legs": []})
+        g["legs"].append({f: l.get(f) for f in STARTED_FIELDS})
+    out["started"] = clean(sorted(late.values(), key=lambda g: g["start"]))
+    sug = STATE.get("plays") or {}
+    lean = [{f: l.get(f) for f in LEAN_FIELDS} for l in STATE["legs"].values() if l.get("assumed")]
+    out["plays"] = clean({"games": sug.get("games") or [], "groups": sug.get("groups") or [], "days": sug.get("days") or [],
+                          "lean_legs": lean, "assumed_odds": config.ASSUMED_PROP_ODDS})
     return out
 
 
 @app.post("/api/slip")
 def api_slip(req: SlipReq):
-    legs = [STATE["legs"][k] for k in req.keys if k in STATE["legs"]]
+    legs = _picks(req.keys)
     if not legs:
         return {"n": 0}
     return clean(parlay.evaluate(legs))
@@ -494,6 +561,8 @@ def api_price(req: PriceReq):
         if req.track and legs:
             tracker.log_slate([{"legs": legs}], {})
         out += legs
+    if out:  # a line priced by hand can change which picks and parlays are best
+        STATE["plays"] = _suggestions(STATE["results"])
     return {"legs": clean(out), "errors": errors}
 
 
@@ -517,8 +586,9 @@ def api_game_line(req: GameLineReq):
             STATE["overrides"].pop((sport, req.game_id), None)
         _save_overrides()
         legs = [l for r in STATE["results"] for l in r["legs"]]
-        STATE["legs"] = {l["key"]: l for l in legs}
+        STATE["legs"] = {l["key"]: l for l in _every_leg(STATE["results"])}
         STATE["parlays"] = engine.build_parlays(legs)
+        STATE["plays"] = _suggestions(STATE["results"])
     try:  # the logged pick should carry the line that was really on offer
         tracker.log_slate([{"legs": gl}], {})
     except Exception as e:
@@ -645,7 +715,7 @@ def api_grade():
 
 @app.post("/api/bets")
 def api_place(req: BetReq):
-    legs = [STATE["legs"][k] for k in req.keys if k in STATE["legs"]]
+    legs = [tracker.with_line(l, req.lines[l["key"]]) if l["key"] in req.lines else l for l in _picks(req.keys)]
     if not legs:
         raise HTTPException(400, "Those picks are no longer loaded - refresh the slate.")
     if req.stake <= 0:

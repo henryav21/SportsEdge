@@ -70,6 +70,9 @@ MIN_CV_GAIN = 0.0
 DEFAULT_BLEND = {"nfl": 0.35, "nba": 0.35}
 
 # Parlays
+# A prop line that arrives without a price (NFL) is given this standard price so it can go in a bet slip or a
+# suggested parlay. It is an assumption and is shown as one: the real price is whatever your sportsbook shows.
+ASSUMED_PROP_ODDS = -115
 PARLAY_MAX_LEGS = 4
 PARLAY_POOL = 28                 # best single legs considered for parlays
 PARLAY_SHOW = 8

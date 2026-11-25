@@ -16,14 +16,15 @@ const S = {
   bankroll: parseFloat(localStorage.getItem("bankroll") || "0") || 0,
   slipEval: null, slipOdds: null, slipStake: null,
   track: null, trackDays: 30, trackLoading: false,
-  parlayTab: "value", likelyTab: "all",
+  parlayTab: "day", parlayGame: null, likelyTab: "all",
   introSeen: localStorage.getItem("intro_seen") === "1",
   form: { sport: "", player: "", market: "", line: "", over: "", under: "", paste: "", from: localStorage.getItem("line_from") || "same" },
   fixOpen: null, // game whose "correct the line" form is open
   gp: {}, gpAll: {}, whyOpen: {},            // per game: chosen stat, "show all", model details open
   pv: localStorage.getItem("props_view") || "game", pg: localStorage.getItem("props_group") || "stat", pgOpen: null, // props page: view, grouping, open games
   focusGame: null, focusForm: false,
-  odds: null, oddsAt: 0, movesGame: null,
+  odds: null, oddsAt: 0, movesGame: null, plays: null, gparOpen: {},
+  started: [], st: {}, slipLines: {}, boxOpen: {},   // games that have started; per game: chosen stat, "show all"; lines typed in the slip
   live: null, liveErr: null, liveFirst: {}, offers: JSON.parse(localStorage.getItem("offers") || "{}"), cash: {},
   priceErrors: [],
   pb: { tab: "", game: "", stat: "", q: "", limit: 40 }, // prop board
@@ -158,7 +159,12 @@ async function poll() {
 async function loadSlate() {
   S.slate = await api("/api/slate");
   S.legs = {};
-  for (const s of S.slate.sports) for (const l of s.legs) S.legs[l.key] = l;
+  S.started = S.slate.started || [];
+  for (const g of S.started) for (const l of g.legs) S.legs[l.key] = l;  // a game that has started: its last numbers
+  const P = S.slate.plays || { games: [], groups: [], days: [], lean_legs: [] };
+  for (const l of P.lean_legs || []) S.legs[l.key] = l;  // props without a price, at an assumed one
+  for (const s of S.slate.sports) for (const l of s.legs) S.legs[l.key] = l;  // a priced pick wins a shared key
+  S.plays = { ...P, byGame: Object.fromEntries((P.games || []).map((g) => [`${g.sport}|${g.game_id}`, g])) };
   const before = S.slip.length;
   S.slip = S.slip.filter((k) => S.legs[k]);
   if (S.slip.length < before) toast("Some picks in your slip have started or are no longer offered and were removed.");
@@ -322,8 +328,8 @@ function pickCard(l) {
 const pickCards = (legs, empty) => (legs.length ? `<div class="pcards">${legs.map(pickCard).join("")}</div>` : `<div class="empty">${empty}</div>`);
 
 function parlayCards(rows) {
-  if (!rows.length) return `<div class="empty" style="padding-left:0">${S.parlayTab === "value" ? "None right now: a value parlay needs at least two value bets from different games." : "None right now."}</div>`;
-  const sgp = S.parlayTab === "sgp";
+  if (!rows.length) return `<div class="empty" style="padding-left:0">None right now: a value parlay needs at least two value bets from different games.</div>`;
+  const sgp = false;
   return `<div class="plcards">${rows.map((p, i) => `<article class="plcard">
       <div class="legchips">${p.legs.map((x) => `<span>${esc(x)}</span>`).join("")}</div>
       <div class="pl-nums">
@@ -332,7 +338,169 @@ function parlayCards(rows) {
         <div title="Break-even odds. Only bet if your sportsbook pays more than this."><span>Fair odds</span><b>${fmtOdds(p.fair_odds)}</b></div>
       </div>
       <div class="pc-foot"><span>${sgp ? `these win together <b>×${num(p.lift, 2)}</b> as often as unrelated picks` : `expected return <b class="${cls(p.ev)}">${spct(p.ev)}</b>`}</span>
-        <button class="btn small" style="margin-left:auto" data-act="add-parlay" data-i="${i}">Add to slip</button></div></article>`).join("")}</div>`;
+        <button class="btn small" style="margin-left:auto" data-act="add-play" data-keys="${esc(JSON.stringify(p.leg_keys))}">Add to slip</button></div></article>`).join("")}</div>`;
+}
+
+// ============================================================================ games that have started
+/* A game that has started, with every pick at the last number before the start. Nothing here is a suggestion:
+   it is for recording a bet that was already placed at the sportsbook. */
+const liveGame = (g) => ((S.live && S.live.scores) || []).find((x) => x.sport === g.sport && x.home === g.home && x.away === g.away);
+function startedCard(g) {
+  const id = `${g.sport}|${g.game_id}`, st = S.st[id] || {};
+  const sc = liveGame(g), on = sc && sc.state !== "pre";
+  const soFar = on ? Object.fromEntries(sc.players.map((p) => [p.key, p])) : null;
+  const score = !on ? `<div class="st-score"><span class="sc-live"><span class="dot"></span>Started</span><span class="muted">score loading ...</span></div>`
+    : `<div class="st-score">${sc.state === "in" ? `<span class="sc-live"><span class="dot"></span>Live</span>` : `<span class="rate r-fair">Final</span>`}
+        <b>${esc(g.away)} ${Math.round(sc.away_score)} – ${Math.round(sc.home_score)} ${esc(g.home)}</b><span>${sc.state === "in" ? esc(sc.detail) : ""}</span>
+        <span class="muted">total so far ${Math.round(sc.away_score + sc.home_score)}</span></div>`;
+  const now = (r) => {
+    if (!soFar) return "";
+    const pl = soFar[r.pkey];
+    if (!pl || pl[r.mkey] == null) return `<small>${g.sport === "nba" ? "not played" : "none yet"}</small>`;
+    return `<small class="${pl[r.mkey] > r.line ? "hit" : ""}">now ${lineNum(pl[r.mkey])}</small>`;
+  };
+  const game = g.legs.filter((l) => !l.player_key), find = (mk, side) => game.find((l) => l.market_key === mk && l.side === side);
+  const btn = (l, main) => {
+    if (!l) return `<span class="mk-none">–</span>`;
+    const on = inSlip(l.key);
+    return `<button class="mk-btn ${on ? "on" : ""}" data-act="toggle" data-key="${esc(l.key)}" aria-label="${on ? "Remove" : "Add"} ${esc(l.selection)}, ${fmtOdds(l.odds)}" title="${esc(l.selection)} at its last price before the game">
+      <span class="mk-main">${main}</span><span class="mk-sub">${l.market_key === "ml" ? "to win" : fmtOdds(l.odds)}</span></button>`;
+  };
+  const sp = (l) => btn(l, l ? signed(l.line, Math.abs(l.line) % 1 ? 1 : 0) : "");
+  const side = (l, label) => {
+    if (!l) return `<span class="muted">–</span>`;
+    const on = inSlip(l.key);
+    return `<button class="side-btn ${on ? "on" : ""}" data-act="toggle" data-key="${esc(l.key)}" aria-label="${on ? "Remove" : "Add"} ${esc(l.selection)}" title="${esc(l.selection)} at its last price before the game">
+      <span class="s">${label}</span><span class="o">${fmtOdds(l.odds)}</span></button>`;
+  };
+  const rows = new Map();
+  for (const l of g.legs) {
+    if (!l.player_key) continue;
+    const k = `${l.player_key}|${l.market_key}`;
+    if (!rows.has(k)) rows.set(k, { player: l.subject, pkey: l.player_key, mkey: l.market_key, market: l.market, line: l.line });
+    rows.get(k)[l.side === "under" ? "under" : "over"] = l;
+  }
+  const all = [...rows.values()], order = STAT_ORDER[g.sport] || [];
+  const stats = [...order.filter((k) => all.some((r) => r.mkey === k)), ...[...new Set(all.map((r) => r.mkey))].filter((k) => !order.includes(k))];
+  const stat = stats.includes(st.stat) ? st.stat : stats[0];
+  const mine = all.filter((r) => r.mkey === stat).sort((a, b) => (b.line ?? 0) - (a.line ?? 0) || a.player.localeCompare(b.player));
+  const shown = st.all ? mine : mine.slice(0, 6);
+  const label = (k) => (all.find((r) => r.mkey === k) || {}).market || k;
+  const props = !all.length ? "" : `<div class="gp-wrap"><div class="gp-hd"><span class="gp-title">Player props</span><span class="muted">${all.length} lines at their last price</span></div>
+      <div class="gp-chips" role="group" aria-label="Stat">${stats.map((k) => `<button data-act="st-stat" data-id="${esc(id)}" data-stat="${esc(k)}" class="${k === stat ? "on" : ""}">${esc(label(k))}</button>`).join("")}</div>
+      <div class="gp-cols"><span>${esc(label(stat))}</span><span>Line</span><span>Over</span><span>Under</span></div>
+      ${shown.map((r) => `<div class="gp-row"><div class="gp-who"><span class="pick">${esc(r.player)}</span></div><div class="gp-line"><b>${lineNum(r.line)}</b>${now(r)}</div>
+        <div class="gp-o">${side(r.over, "Over")}</div><div class="gp-u">${side(r.under, "Under")}</div></div>`).join("")}
+      ${mine.length > 6 ? `<div class="gp-foot"><button class="linkish" data-act="st-more" data-id="${esc(id)}">${st.all ? "Show fewer" : `Show all ${mine.length} ${esc(label(stat))} lines`}</button><span></span></div>` : ""}</div>`;
+  return `<article class="game started" id="st-${g.sport}-${esc(g.game_id)}">
+    <div class="g-hd">${teamBadge(g.sport, g.away)}<span class="m">${esc(g.away)} <span class="at">@</span> ${esc(g.home)}</span>${teamBadge(g.sport, g.home)}
+      <span class="time">${SPORT_ICON[g.sport] || ""} started ${when(g.start)}</span></div>
+    ${score}
+    <div class="mkt" role="table" aria-label="Main bets for ${esc(g.away)} at ${esc(g.home)}, at the last price before the game">
+      <span></span><span class="mk-h">Moneyline</span><span class="mk-h">Over / Under</span><span class="mk-h">Spread</span>
+      <span class="mk-team">${esc(g.away)}</span>${btn(find("ml", "away"), find("ml", "away") ? fmtOdds(find("ml", "away").odds) : "")}${btn(find("total", "over"), find("total", "over") ? `O ${lineNum(find("total", "over").line)}` : "")}${sp(find("spread", "away"))}
+      <span class="mk-team">${esc(g.home)}</span>${btn(find("ml", "home"), find("ml", "home") ? fmtOdds(find("ml", "home").odds) : "")}${btn(find("total", "under"), find("total", "under") ? `U ${lineNum(find("total", "under").line)}` : "")}${sp(find("spread", "home"))}
+    </div>${props}</article>`;
+}
+function startedSection() {
+  const games = S.started.filter((g) => S.sport === "all" || g.sport === S.sport);
+  if (!games.length) return "";
+  return `<h2 class="sec-title" id="sec-started">🔴 Started games <span class="muted">${games.length}</span></h2>
+  <p class="note sec-note">Live score, and each player's number so far next to his line. These games have started, so nothing here is a suggestion. The lines and prices are the last ones before each game began, kept so you can <b>record a bet you already placed</b>:
+    tap the picks you bet, type the odds from your sportsbook's slip, and press <i>Record bet</i>. If your line was different, change it in the bet slip. The Live page then follows the bet.</p>
+  <div class="games">${games.map(startedCard).join("")}</div>`;
+}
+
+// ============================================================================ suggested picks and parlays
+const assumedOdds = () => fmtOdds((S.plays && S.plays.assumed_odds) || -115);
+/* What a pick without a real price is: how strongly the simulator leans, never "value". */
+function leanChip(l) {
+  const strong = Math.abs(l.lean || 0) >= settings().prop_lean;
+  return `<span class="rate r-lean" title="The simulator's projection is on this side of the line. The feed has no price for this prop, so the tool cannot say whether it pays: check the price on your sportsbook.">${strong ? "💪 Strong lean" : "Lean"}</span>`;
+}
+/* One suggested pick inside a game: what it is, its chance, its price, and a button to add it. */
+function topPick(l) {
+  const on = inSlip(l.key);
+  const price = l.assumed ? `<span class="muted" title="The feed has no price for this prop. ${assumedOdds()} is a typical price, used until you type the real one from your slip.">no price in the feed</span>`
+    : `<span>${fmtOdds(l.odds)}</span><span class="muted">return <span class="${cls(l.ev)}">${spct(l.ev)}</span></span>`;
+  return `<li class="tp-row"><button class="add ${on ? "on" : ""}" data-act="toggle" data-key="${esc(l.key)}" aria-label="${on ? "Remove" : "Add"} ${esc(l.selection)} ${on ? "from" : "to"} the bet slip" title="Add to bet slip">${on ? "✓" : "+"}</button>
+    <div class="tp-main"><div class="pick">${esc(l.selection)}</div><div class="tp-sub">${l.assumed ? leanChip(l) : chip(ratingOf(l))}${price}</div></div>
+    <div class="tp-chance" title="The tool's chance this pick wins">${pct(l.p_cond, 0)}<small>to win</small></div></li>`;
+}
+/* A suggested parlay. The payout is exact only when every pick has a real price and no two share a game. */
+function playCard(p) {
+  const legs = p.leg_keys.map((k) => S.legs[k]).filter(Boolean);
+  if (legs.length < p.leg_keys.length) return "";
+  const all = legs.every((l) => inSlip(l.key));
+  const why = [p.assumed ? `${p.assumed === p.n ? "these picks have" : `${p.assumed} of these picks ${p.assumed === 1 ? "has" : "have"}`} no price in the feed, so ${assumedOdds()} each is assumed` : "",
+    p.same_game ? "picks from the same game get their own price from your sportsbook" : ""].filter(Boolean).join("; and ");
+  return `<article class="plcard play t-${p.tier}">
+      <div class="play-hd"><span class="tier">${esc(p.label)}</span><span class="muted">${p.n} picks${p.games.length > 1 ? ` · ${p.games.length} games` : ""}</span>
+        <span class="pay" title="${p.est ? "An estimate: what these picks would pay if each were priced on its own" : "The standard parlay price for these picks"}">${p.est ? "about " : ""}${fmtOdds(p.odds)}</span></div>
+      <ul class="play-legs">${legs.map((l) => `<li><span class="pick">${esc(l.selection)}</span><span class="muted">${p.games.length > 1 ? `${esc(l.game)} · ` : ""}${pct(l.p_cond, 0)}</span></li>`).join("")}</ul>
+      <div class="pl-nums ${p.est ? "two" : ""}">
+        <div title="The tool's chance that every pick wins. Picks from the same game keep the way they move together."><span>Chance to hit</span><b>${pct(p.p_hit, p.p_hit < 0.1 ? 1 : 0)}</b></div>
+        <div title="Break-even odds. Only bet if your sportsbook pays more than this."><span>Fair odds (break-even)</span><b>${fmtOdds(p.fair_odds)}</b></div>
+        ${p.est ? "" : `<div title="Average profit per $1 bet over many bets"><span>Expected return</span><b class="${cls(p.ev)}">${spct(p.ev)}</b></div>`}
+      </div>
+      ${p.est ? `<p class="play-note">The payout is an estimate: ${why}. Build it at your sportsbook and bet it only if the slip pays more than <b>${fmtOdds(p.fair_odds)}</b>.</p>` : ""}
+      <button class="btn small ${all ? "" : "primary"}" data-act="add-play" data-keys="${esc(JSON.stringify(p.leg_keys))}" ${all ? "disabled" : ""}>${all ? "In your slip" : "Add all to slip"}</button></article>`;
+}
+const playCards = (list) => { const h = (list || []).map(playCard).join(""); return h ? `<div class="plcards">${h}</div>` : ""; };
+const playsShown = (list) => (list || []).filter((p) => p.leg_keys.every((k) => S.legs[k] && (S.sport === "all" || S.legs[k].sport.toLowerCase() === S.sport)));
+const dayName = (date) => { const d = new Date(`${date}T12:00:00`); return d.toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" }); };
+
+/* A game's suggested picks, with its three parlays folded underneath. */
+function gamePlays(s, g) {
+  const gp = S.plays && S.plays.byGame[`${s.sport}|${g.game_id}`];
+  const picks = gp ? gp.picks.map((k) => S.legs[k]).filter(Boolean) : [];
+  if (!picks.length) return "";
+  const pars = gp.parlays.filter((p) => p.leg_keys.every((k) => S.legs[k]));
+  const id = `${s.sport}|${g.game_id}`;
+  return `<div class="tp"><div class="mini-lab">⭐ Top picks for this game <span class="muted">best return for the price first</span></div>
+    <ul class="tp-list">${picks.map(topPick).join("")}</ul>
+    ${pars.length ? `<details class="gpar" data-gpar="${esc(id)}" ${S.gparOpen[id] ? "open" : ""}><summary>Parlays from this game: ${pars.map((p) => `${esc(p.label)} ${p.est ? "~" : ""}${fmtOdds(p.odds)}`).join(" · ")}</summary>${playCards(pars)}</details>` : ""}</div>`;
+}
+
+/* The Parlays section: the best parlay at three sizes of payout, for a day, a group of games, or one game. */
+function parlaySection() {
+  const P = S.plays || { days: [], groups: [], games: [] };
+  const tabs = [["day", "By day"], ["group", "Group of games"], ["game", "Each game"], ["value", "Value only"]];
+  let body;
+  if (S.parlayTab === "value") {
+    const rows = (S.slate.parlays.value || []).filter((p) => S.sport === "all" || p.leg_keys.every((k) => S.legs[k] && S.legs[k].sport.toLowerCase() === S.sport));
+    body = `<p class="note" style="margin:0 0 8px">Every pick here has a positive expected return at a real price and comes from a different game, so the standard parlay price applies. Often there are none.</p>${parlayCards(rows)}`;
+  } else if (S.parlayTab === "game") {
+    const games = (P.games || []).filter((g) => (S.sport === "all" || g.sport === S.sport) && g.parlays.length);
+    if (!games.some((g) => `${g.sport}|${g.game_id}` === S.parlayGame)) S.parlayGame = games.length ? `${games[0].sport}|${games[0].game_id}` : null;
+    const sel = games.find((g) => `${g.sport}|${g.game_id}` === S.parlayGame);
+    body = !sel ? `<div class="empty" style="padding-left:0">No game has enough picks for a parlay right now.</div>`
+      : `<label class="play-pick">Game <select data-bind-play="game">${games.map((g) => `<option value="${g.sport}|${esc(g.game_id)}" ${`${g.sport}|${g.game_id}` === S.parlayGame ? "selected" : ""}>${SPORT_ICON[g.sport] || ""} ${esc(g.game)} · ${when(g.start)}</option>`).join("")}</select></label>
+        ${playCards(sel.parlays)}`;
+  } else {
+    let list = (S.parlayTab === "day" ? P.days : P.groups) || [];
+    if (S.parlayTab === "day") {
+      const have = new Set(list.map((d) => d.date)), solo = {};
+      for (const g of P.games || []) if (!have.has(g.date)) (solo[g.date] = solo[g.date] || []).push(g);
+      const extra = Object.entries(solo).filter(([, gs]) => gs.length === 1 && gs[0].parlays.length)
+        .map(([date, [g]]) => ({ date, start: g.start, n_games: 1, only: g.game, parlays: g.parlays }));
+      list = [...list, ...extra].sort((a, b) => String(a.start).localeCompare(String(b.start)));
+    }
+    const blocks = list.map((d) => {
+      const cards = playCards(playsShown(d.parlays));
+      if (!cards) return "";
+      const title = S.parlayTab === "day" ? `${dayName(d.date)} <span class="muted">${d.n_games === 1 ? `1 game: ${esc(d.only)}` : `${d.n_games} games`}</span>`
+        : `${SPORT_ICON[d.sport] || ""} ${d.sport.toUpperCase()} · ${when(d.start)} <span class="muted">${d.n_games} games starting together: ${d.games.map(esc).join(", ")}</span>`;
+      return `<h3 class="play-scope">${title}</h3>${cards}`;
+    }).join("");
+    body = blocks || `<div class="empty" style="padding-left:0">${S.parlayTab === "day" ? "No day has two or more games with picks right now." : "No group of games right now: a group needs two or more games of one sport starting within 90 minutes of each other."}</div>`;
+  }
+  const intro = S.parlayTab === "value" ? "" : `<p class="note" style="margin:0 0 4px">For each ${S.parlayTab === "day" ? "day" : S.parlayTab === "group" ? "group of games" : "game"}, the best parlay at three sizes of payout.
+      <b>Best</b> means the picks that give up the least to the sportsbook for that payout, so you get the most odds the picks can justify. ${S.parlayTab === "game" ? "" : "No more than two picks come from any one game. "}
+      Every added pick lowers the chance to hit, so check <b>fair odds</b>: that is what the bet needs to pay to be worth it.</p>`;
+  return `<section class="card" id="sec-parlays"><div class="hd"><h2>🧩 Parlays</h2><span class="sub">the best to play, by day, group of games or game</span>
+      <div class="right"><div class="seg" role="group" aria-label="Parlays for">${tabs.map(([k, l]) => `<button data-act="ptab" data-tab="${k}" class="${S.parlayTab === k ? "on" : ""}">${l}</button>`).join("")}</div></div></div>
+    <div class="bd">${intro}${body}</div></section>`;
 }
 
 function pageSlate() {
@@ -349,13 +517,6 @@ function pageSlate() {
   const both = S.sport === "all" && S.slate.sports.length > 1;
   const book = gameLegs[0]?.book || "the sportsbook";
 
-  const parlays = (S.slate.parlays[S.parlayTab] || []).filter((p) => S.sport === "all" || p.leg_keys.every((k) => S.legs[k] && S.legs[k].sport.toLowerCase() === S.sport));
-  const ptabs = [["value", "Best value"], ["safe", "Most likely to hit"], ["sgp", "Same game"]];
-  const pblurb = {
-    value: "Every pick has a positive expected return and comes from a different game, so the standard parlay price applies.",
-    safe: "The combinations most likely to hit that still pay +150 or better. Usually not profitable in the long run: each added pick adds the book's fee again.",
-    sgp: "Picks from one game that tend to win together. Your sportsbook sets its own price for these: only bet if it offers better than the fair odds shown.",
-  }[S.parlayTab];
   const ltabs = [["all", "Everything"], ["games", "Game bets"], ["props", "Player props"]];
 
   const sched = sports.flatMap((s) => s.games.map((g) => ({ g, s }))).sort((a, b) => String(a.g.start).localeCompare(String(b.g.start)));
@@ -387,15 +548,15 @@ function pageSlate() {
     </div></section>
   <div class="filters">${sportSeg()}${jumpNav([["sec-value", "Value bets", value.length], ["sec-likely", "Most likely"], ["sec-parlays", "Parlays"], ["sec-games", "Games", nGames], ["sec-all", "All bets", legs.length]])}</div>
   ${intro}
+  ${S.started.some((g) => S.sport === "all" || g.sport === S.sport) ? `<div class="banner"><span>🔴 <b>${S.started.filter((g) => S.sport === "all" || g.sport === S.sport).length === 1 ? "A game has" : "Some games have"} started.</b> Placed a bet on one at your sportsbook? You can still record it here.</span><button class="btn small" data-act="jump" data-to="sec-started">Record a bet</button></div>` : ""}
   <section class="card" id="sec-value"><div class="hd"><h2>🔥 Value bets</h2><span class="sub">the win chance beats the sportsbook's price by a real margin</span><div class="right">${guideLink()}</div></div>
     ${pickCards(value, `<b>No value bets right now.</b> That is the normal state. Sportsbook prices are accurate, and this tool only calls something value where testing showed a real edge, so it will not invent picks.
       Check again closer to game time, or compare your own sportsbook's line on the <button class="linkish" data-act="nav" data-page="props">Player props</button> page.`)}</section>
   <section class="card" id="sec-likely"><div class="hd"><h2>🎯 Most likely to win</h2><span class="sub">highest win chance, odds no shorter than −400. Likely is not the same as profitable: check the rating.</span>
       <div class="right"><div class="seg" role="group" aria-label="Type of pick">${ltabs.map(([k, l]) => `<button data-act="ltab" data-tab="${k}" class="${S.likelyTab === k ? "on" : ""}">${l}</button>`).join("")}</div></div></div>
     ${pickCards(likely, S.likelyTab === "props" ? "No priced props right now. NFL props come without prices: see the Player props page." : "Nothing priced.")}</section>
-  <section class="card" id="sec-parlays"><div class="hd"><h2>🧩 Parlays</h2><span class="sub">several picks that must all win</span>
-      <div class="right"><div class="seg" role="group" aria-label="Type of parlay">${ptabs.map(([k, l]) => `<button data-act="ptab" data-tab="${k}" class="${S.parlayTab === k ? "on" : ""}">${l} <span class="muted">${(S.slate.parlays[k] || []).length}</span></button>`).join("")}</div></div></div>
-    <div class="bd"><p class="note" style="margin:0 0 8px">${pblurb}</p>${parlayCards(parlays)}</div></section>
+  ${parlaySection()}
+  ${startedSection()}
   <h2 class="sec-title" id="sec-games">🏟️ Games <span class="muted">${nGames}</span></h2>
   <p class="note sec-note">Tap any price to add it to the bet slip. A green dot marks a value bet. These lines reach the tool through ESPN's feed, which can run behind the sportsbook: if yours shows a different number, correct it at the bottom of the game.</p>
   ${strip}
@@ -471,6 +632,7 @@ function gameCard(g, s, showSport) {
         <span class="muted">Total</span><span class="v">${num(g.mkt_total)}</span><span class="v">${num(g.model_total)}</span></div>
       ${drv ? `<div class="mini-lab" style="margin-top:8px">What moves the model most <span class="muted">(points toward ${esc(g.home)} →)</span></div><div class="drivers">${drv}</div>` : ""}
       <p class="note" style="margin:8px 0 0">The win chances above start from the sportsbook's price and move toward the model only as far as testing has justified.</p></details>
+    ${gamePlays(s, g)}
     ${gameProps(s, g)}
     ${fixForm(g, s)}</article>`;
 }
@@ -907,9 +1069,10 @@ function parsePaste(text, sport) {
 
 // ============================================================================ live page
 let liveTimer = null;
+const watchingLive = () => S.page === "live" || (S.page === "slate" && S.started.length > 0);
 function liveLoop() {
   clearTimeout(liveTimer);
-  if (S.page !== "live") return;
+  if (!watchingLive()) return;
   const due = !S.live || Date.now() - (S.liveAt || 0) > 5000;
   if (due) loadLive();
   else liveTimer = setTimeout(loadLive, S.live && S.live.in_play ? 30000 : 120000);
@@ -923,6 +1086,11 @@ async function loadLive() {
     for (const b of S.live.bets) if (!(b.id in S.liveFirst)) S.liveFirst[b.id] = b.value;
   } catch (e) { S.liveErr = String(e.message || e); }
   S.liveAt = Date.now();
+  if (S.page === "slate" && S.started.length) {  // only the started games change: redraw those, leave the rest of the page alone
+    for (const g of S.started) { const el = document.getElementById(`st-${g.sport}-${g.game_id}`); if (el) el.outerHTML = startedCard(g); }
+    liveTimer = setTimeout(loadLive, S.live && S.live.in_play ? 30000 : 120000);
+    return;
+  }
   if (S.page !== "live") return;
   // do not redraw under someone typing an offer: refresh the numbers on the next pass instead
   const typing = document.activeElement && document.activeElement.classList.contains("offer");
@@ -1032,9 +1200,27 @@ function scoreCard(g) {
   const wp = live && g.home_wp != null ? `<div class="wp" title="ESPN's own live estimate, not this tool's"><span>${esc(g.away)} ${pct(1 - g.home_wp, 0)}</span>
       <span class="bar"><span style="width:${(1 - g.home_wp) * 100}%;background:var(--s2)"></span><span style="width:${g.home_wp * 100}%;background:var(--s1)"></span></span><span>${pct(g.home_wp, 0)} ${esc(g.home)}</span></div>
       <div class="sc-note">win chance right now (ESPN's estimate)</div>` : "";
+  const late = S.started.find((x) => x.sport === g.sport && x.home === g.home && x.away === g.away);
   return `<article class="sc ${live ? "live" : ""}"><div class="sc-top"><span>${SPORT_ICON[g.sport] || ""} ${state}</span></div>
-    ${row("away", g.away, as)}${row("home", g.home, hs)}${wp}</article>`;
+    ${row("away", g.away, as)}${row("home", g.home, hs)}${wp}
+    ${g.players && g.players.length ? `<details class="sc-box" data-box="${esc(g.event_id)}" ${S.boxOpen[g.event_id] ? "open" : ""}><summary>Player stats${live ? " so far" : ""}</summary>${boxTable(g)}</details>` : ""}
+    ${late && !done ? `<button class="linkish sc-rec" data-act="go-started" data-to="st-${late.sport}-${esc(late.game_id)}">Record a bet on this game</button>` : ""}</article>`;
 }
+/* Every player's line so far for one game, a team at a time. */
+function boxTable(g) {
+  const cols = g.sport === "nba" ? [["min", "MIN"], ["pts", "PTS"], ["reb", "REB"], ["ast", "AST"], ["fg3m", "3PM"], ["stl", "STL"], ["blk", "BLK"]]
+    : [["pass_yds", "PASS"], ["rush_yds", "RUSH"], ["rec_yds", "REC YD"], ["receptions", "REC"], ["anytime_td", "TD"]];
+  const weight = g.sport === "nba" ? (x) => x.pts || 0 : (x) => (x.pass_yds || 0) + (x.rush_yds || 0) + (x.rec_yds || 0);
+  const team = (t) => {
+    const ps = g.players.filter((x) => x.team === t).sort((a, b) => weight(b) - weight(a) || a.name.localeCompare(b.name));
+    if (!ps.length) return "";
+    return `<div class="bx-team">${teamBadge(g.sport, t, true)}<span>${esc(t)}</span></div>
+      <div class="bx-row bx-hd"><span></span>${cols.map((c) => `<span>${c[1]}</span>`).join("")}</div>
+      ${ps.map((x) => `<div class="bx-row"><span class="bx-name">${esc(x.name)}</span>${cols.map((c) => `<span>${x[c[0]] == null ? "–" : lineNum(x[c[0]])}</span>`).join("")}</div>`).join("")}`;
+  };
+  return `<div class="bx n${cols.length}">${team(g.away)}${team(g.home)}</div>`;
+}
+
 function scoreboard() {
   const games = (S.live.scores || []).filter((g) => S.sport === "all" || g.sport === S.sport);
   if (!games.length) return "";
@@ -1044,7 +1230,7 @@ function scoreboard() {
 }
 
 function pageLive() {
-  const head = pageHead("🔴 Live", "Your recorded bets as they stand right now, pick by pick, with real scores and stat lines, plus today's scoreboard. It checks for new numbers every 30 seconds while a game is on.");
+  const head = pageHead("🔴 Live", "Your recorded bets as they stand right now, pick by pick, with real scores and stat lines, plus today's scoreboard with every player's stats. It checks for new numbers every 30 seconds while a game is on.");
   if (!S.live && !S.liveErr) return `${head}<div class="empty"><span class="spinner"></span>Checking the games ...</div>`;
   if (!S.live) return `${head}<div class="banner warn">Could not load live data: ${esc(S.liveErr)}</div>`;
   const bets = S.live.bets;
@@ -1052,7 +1238,8 @@ function pageLive() {
     <span class="spacer"></span><button class="btn" data-act="live-refresh">Check now</button></div>`;
   if (!bets.length) {
     return `${head}${bar}<section class="card"><div class="empty"><b>No open bets to follow.</b> After you place a bet at your sportsbook, add the same picks to the bet slip here, enter the odds and your stake, and click <i>Record bet</i>.
-      It then shows up on this page with live scores, and you can check any cash-out offer against it.</div></section>${scoreboard()}`;
+      It then shows up on this page with live scores, and you can check any cash-out offer against it.
+      ${S.started.length ? `<br><br><b>Already bet on a game that has started?</b> <button class="linkish" data-act="go-started" data-to="sec-started">Record it from the Started games list</button>.` : ""}</div></section>${scoreboard()}`;
   }
   const open = bets.filter((b) => b.open), done = bets.filter((b) => !b.open);
   const atStake = open.reduce((n, b) => n + b.stake, 0), worth = open.reduce((n, b) => n + b.value, 0);
@@ -1395,6 +1582,15 @@ function renderGuide() {
     <h3>During the games</h3>
     <p>The <b>Live</b> page follows every bet you recorded, pick by pick, with real scores and stat lines. If your sportsbook offers a cash-out, type the amount in and the tool compares it with what the bet is worth right now:
       what it would pay, times the chance the remaining picks win. Sportsbooks usually offer less than that. Cashing out can still make sense when the possible win is large next to your bankroll, and the page tells you the amount at which it does.</p>
+    <h3>Recording a bet on a game that has started</h3>
+    <p>Once a game starts it leaves the list of games to come, because its prices are no longer on offer. It moves to <b>Started games</b> on the Today page, with every pick at its last number before the start.
+      Use that to record a bet you already placed: tap the picks, type the odds from your slip, change a line if yours was different, and record it. The Live page then follows it.</p>
+    <h3>Top picks and suggested parlays</h3>
+    <p>Each game lists its <b>top picks</b>: the picks that return the most for their price. The <b>Parlays</b> section then gives the best parlay for each day,
+      each group of games that start together, and each game, at three sizes of payout: <b>Safer</b> (about +100 to +300), <b>Balanced</b> (+300 to +800) and <b>Long shot</b> (+800 and up).
+      Across several games no more than two picks come from one game, so a single game cannot sink the bet on its own.</p>
+    <p>A parlay multiplies the sportsbook's fee along with the payout, so bigger odds are not better by themselves. What matters is the <b>fair odds</b>: bet it when your slip pays more than that.
+      NFL props reach the tool without prices. They are listed as a <b>lean</b>, never as value, and their payout is an estimate until you type in the odds from your slip.</p>
     <h3>Line moves</h3>
     <p>The <b>Line moves</b> page shows how each game's spread, total and moneyline have moved since the sportsbook first posted them, with a chart per game.
       The tool checks the feed every few minutes, logs every change, and reworks the picks by itself when a line has moved.</p>
@@ -1681,15 +1877,19 @@ function renderSlip() {
   }
   html += `<div class="items">${legs.map((l) => `<div class="item"><div class="sel">${esc(l.selection)}</div>
       <button class="x" data-act="toggle" data-key="${esc(l.key)}" aria-label="Remove ${esc(l.selection)}">×</button>
-      <div class="meta">${esc(l.game)} · ${fmtOdds(l.odds)} · win chance ${pct(l.p_cond, 0)}</div></div>`).join("")}</div>`;
+      <div class="meta">${esc(l.game)} · ${l.started ? `started · last price ${fmtOdds(l.odds)}` : l.assumed ? `no price in the feed (${fmtOdds(l.odds)} assumed)` : fmtOdds(l.odds)} · win chance ${l.started ? "before the game " : ""}${pct(l.p_cond, 0)}</div>
+      ${l.started && l.line != null ? `<label class="sline">Your line <input type="number" step="0.5" data-line-key="${esc(l.key)}" value="${esc(S.slipLines[l.key] ?? l.line)}" aria-label="The line you bet for ${esc(l.selection)}"></label>` : ""}</div>`).join("")}</div>`;
+  const nAssumed = legs.filter((l) => l.assumed).length, nStarted = legs.filter((l) => l.started).length;
   const E = S.slipEval;
   if (E && E.n) {
     const conflicts = E.conflicts && E.conflicts.length;
     html += `<div class="sum">
       ${conflicts ? `<div class="banner warn" style="margin:0">Two sides of the same bet are in the slip. Remove one.</div>` : ""}
-      <div class="kv"><span class="k">${legs.length > 1 ? "Parlay odds (standard)" : "Odds"}</span><span class="v">${fmtOdds(E.odds)}</span></div>
+      <div class="kv"><span class="k">${legs.length > 1 ? `Parlay odds (${nAssumed ? "estimate" : "standard"})` : nAssumed ? "Odds (assumed)" : "Odds"}</span><span class="v">${fmtOdds(E.odds)}</span></div>
       <div class="kv"><span class="k">${legs.length > 1 ? "Chance every pick wins" : "Win chance"}</span><span class="v">${pct(E.p_win_all)}${E.p_hit - E.p_win_all > 0.005 ? ` <span class="muted" style="font-weight:400">+${pct(E.p_hit - E.p_win_all)} push</span>` : ""}</span></div>
       <div class="kv" title="Only bet if your sportsbook pays more than this"><span class="k">Fair odds (break-even)</span><span class="v">${fmtOdds(E.fair_odds)}</span></div>
+      ${nStarted ? `<div class="hint"><b>${nStarted === legs.length ? (legs.length === 1 ? "This game has" : "These games have") : `${nStarted} of these picks are from games that have`} started.</b> The odds and chances shown are the last ones before the start. Check each line matches the one you bet, type the odds from your slip, and record it: the Live page takes over from there.</div>` : ""}
+      ${nAssumed ? `<div class="hint"><b>${nAssumed === legs.length ? (legs.length === 1 ? "This pick has" : "These picks have") : `${nAssumed} of these picks ${nAssumed === 1 ? "has" : "have"}`} no price in the feed.</b> The odds shown assume ${assumedOdds()} for each, a typical price. Type the real odds from your sportsbook's slip below before trusting the return.</div>` : ""}
       ${E.same_game ? `<div class="hint">These picks are from the same game and win together ×${num(E.lift, 2)} as often as unrelated picks would. Your sportsbook prices same-game parlays itself, so type in the odds it offers.</div>` : ""}
       <div class="row"><label>Odds on your sportsbook's slip<input type="number" step="1" id="slipOdds" value="${S.slipOdds ?? ""}" aria-describedby="slipOddsHelp"></label>
         <label>Stake $<input type="number" min="0" step="1" id="slipStake" value="${S.slipStake ?? ""}" placeholder="0"></label></div>
@@ -1770,6 +1970,14 @@ document.addEventListener("click", async (e) => {
     if (location.hash === `#props/${a.dataset.sport}`) renderMain(); else location.hash = `props/${a.dataset.sport}`;
     return;
   }
+  if (act === "st-stat" || act === "st-more") {
+    const id = a.dataset.id, cur = S.st[id] || {};
+    S.st[id] = act === "st-stat" ? { stat: a.dataset.stat, all: false } : { ...cur, all: !cur.all };
+    const g = S.started.find((x) => `${x.sport}|${x.game_id}` === id), el = g && document.getElementById(`st-${g.sport}-${g.game_id}`);
+    if (el) el.outerHTML = startedCard(g);
+    return;
+  }
+  if (act === "go-started") { S.focusGame = a.dataset.to; if (S.page === "slate") renderMain(); else location.hash = "slate"; return; }
   if (act === "gp-stat") { S.gp[a.dataset.gp] = a.dataset.stat; S.gpAll[a.dataset.gp] = false; redrawGameProps(a.dataset.gp); return; }
   if (act === "gp-more") { S.gpAll[a.dataset.gp] = !S.gpAll[a.dataset.gp]; redrawGameProps(a.dataset.gp); return; }
   if (act === "pv") { S.pv = a.dataset.v; localStorage.setItem("props_view", S.pv); renderMain(); return; }
@@ -1792,13 +2000,14 @@ document.addEventListener("click", async (e) => {
   if (act === "ltab") { S.likelyTab = a.dataset.tab; renderMain(); return; }
   if (act === "pb-tab") { S.pb.tab = a.dataset.tab; S.pb.limit = 40; renderMain(); return; }
   if (act === "pb-more") { S.pb.limit += 100; renderMain(); return; }
-  if (act === "add-parlay") {
-    const list = (S.slate.parlays[S.parlayTab] || []).filter((p) => S.sport === "all" || p.leg_keys.every((k) => S.legs[k] && S.legs[k].sport.toLowerCase() === S.sport));
-    const p = list[+a.dataset.i];
-    if (!p) return;
-    S.slip = [...new Set([...S.slip, ...p.leg_keys.filter((k) => S.legs[k])])];
+  if (act === "add-play") {
+    let keys = [];
+    try { keys = JSON.parse(a.dataset.keys || "[]"); } catch (err) { keys = []; }
+    keys = keys.filter((k) => S.legs[k]);
+    if (!keys.length) return;
+    S.slip = [...new Set([...S.slip, ...keys])];
     saveSlip(); await evalSlip(); renderSlip(); renderMain();
-    toast("Parlay added to the bet slip");
+    toast(`${keys.length} picks added to the bet slip`);
     return;
   }
   if (act === "refresh") {
@@ -1827,10 +2036,12 @@ document.addEventListener("click", async (e) => {
     const odds = parseFloat(S.slipOdds), stake = parseFloat(S.slipStake);
     if (isNaN(odds) || !(stake > 0)) { toast("Enter the odds and a stake first"); return; }
     try {
-      await api("/api/bets", { method: "POST", body: JSON.stringify({ keys: S.slip, odds, stake }) });
+      const lines = {};
+      for (const k of S.slip) { const v = parseFloat(S.slipLines[k]), l = S.legs[k]; if (l && l.started && !isNaN(v) && l.line != null && Math.abs(v - l.line) > 1e-9) lines[k] = v; }
+      await api("/api/bets", { method: "POST", body: JSON.stringify({ keys: S.slip, odds, stake, lines }) });
       toast("Recorded. Follow it on the Live page.");
       S.live = null; S.odds = null;
-      S.slip = []; saveSlip(); S.slipEval = null; S.slipStake = null; S.track = null;
+      S.slip = []; saveSlip(); S.slipEval = null; S.slipStake = null; S.track = null; S.slipLines = {};
       renderSlip(); renderMain();
     } catch (err) { toast(String(err.message || err)); }
     return;
@@ -1891,6 +2102,7 @@ document.addEventListener("input", (e) => {
     return;
   }
   if (t.id === "slipOdds") { S.slipOdds = t.value; updateSlipCalc(); return; }
+  if (t.dataset.lineKey) { S.slipLines[t.dataset.lineKey] = t.value; return; }
   if (t.id === "slipStake") { S.slipStake = t.value; updateSlipCalc(); return; }
   const bind = t.dataset.bind;
   if (!bind) return;
@@ -1905,6 +2117,7 @@ document.addEventListener("input", (e) => {
 document.addEventListener("change", (e) => {
   const t = e.target;
   if (t.dataset.jump && t.value) { const el = document.getElementById(t.value); t.value = ""; if (el) el.scrollIntoView({ block: "start", behavior: "smooth" }); return; }
+  if (t.dataset.bindPlay === "game") { S.parlayGame = t.value; renderMain(); return; }
   if (t.dataset.pgjump && t.value) { const id = t.value; S.pgOpen = { ...(S.pgOpen || {}), [id]: true }; S.focusGame = `pg-${id.replace("|", "-")}`; renderMain(); return; }
   const bind = t.dataset.bind;
   if (bind && t.tagName === "SELECT") {
@@ -1918,6 +2131,8 @@ document.addEventListener("change", (e) => {
 
 document.addEventListener("toggle", (e) => {
   if (e.target.dataset && e.target.dataset.why) S.whyOpen[e.target.dataset.why] = e.target.open;
+  if (e.target.dataset && e.target.dataset.gpar) S.gparOpen[e.target.dataset.gpar] = e.target.open;
+  if (e.target.dataset && e.target.dataset.box) S.boxOpen[e.target.dataset.box] = e.target.open;
   if (e.target.dataset && e.target.dataset.pg) {
     const id = e.target.dataset.pg, was = !!(S.pgOpen || {})[id];
     S.pgOpen = { ...(S.pgOpen || {}), [id]: e.target.open };

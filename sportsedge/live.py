@@ -80,15 +80,22 @@ def scoreboard(sport: str, day: dt.date) -> list[dict]:
 
 def scores(sports=("nfl", "nba"), day: dt.date | None = None) -> list[dict]:
     """Today's games with score and clock: in play first, then still to come, then finished. A game in play
-    also carries ESPN's own live win chance for the home team (theirs, not this tool's)."""
+    also carries ESPN's own live win chance for the home team (theirs, not this tool's). A game that has
+    started carries every player's stat line so far."""
     day = day or dt.date.today()
     out = []
     for sport in sports:
         for g in scoreboard(sport, day):
-            row = {"sport": sport, "home_wp": None,
+            row = {"sport": sport, "home_wp": None, "players": [],
                    **{k: g[k] for k in ("event_id", "home", "away", "home_score", "away_score", "state", "detail", "start")}}
-            if g["state"] == "in":
-                row["home_wp"] = boxscore(sport, g["event_id"]).get("home_wp")
+            if g["state"] in ("in", "post"):
+                # a finished game's numbers no longer change, so they are asked for far less often
+                box = boxscore(sport, g["event_id"]) if g["state"] == "in" else                     _fresh(("final", sport, g["event_id"]), lambda: boxscore(sport, g["event_id"]), ttl=600)
+                if g["state"] == "in":
+                    row["home_wp"] = box.get("home_wp")
+                who = box.get("names") or {}
+                row["players"] = [{"key": k, "name": (who.get(k) or {}).get("name") or k.title(), "team": (who.get(k) or {}).get("team") or "",
+                                   **{s: v for s, v in st.items() if not s.startswith("_")}} for k, st in (box.get("players") or {}).items()]
             out.append(row)
     order = {"in": 0, "pre": 1, "post": 2}
     out.sort(key=lambda r: (order.get(r["state"], 3), str(r["start"])))
@@ -119,7 +126,9 @@ def _split(s: str, sep: str) -> tuple[float, float]:
 def parse_boxscore(sport: str, j: dict) -> dict:
     """ESPN game summary -> {'players': {player_key: {our stat name: value}}, 'home_wp': live home win chance}."""
     players: dict[str, dict] = {}
+    names: dict[str, dict] = {}  # player key -> how to show him: name and team
     for team in (j.get("boxscore") or {}).get("players", []):
+        abbr = sources.norm_team(sport, (team.get("team") or {}).get("abbreviation") or "")
         for grp in team.get("statistics", []):
             keys = grp.get("keys") or []
             gname = grp.get("name")
@@ -129,7 +138,9 @@ def parse_boxscore(sport: str, j: dict) -> dict:
                 st = dict(zip(keys, a.get("stats") or []))
                 if not st:
                     continue
-                p = players.setdefault(norm_name((a.get("athlete") or {}).get("displayName", "")), {})
+                shown = (a.get("athlete") or {}).get("displayName", "")
+                p = players.setdefault(norm_name(shown), {})
+                names[norm_name(shown)] = {"name": shown, "team": abbr}
                 num = lambda k: _split(st.get(k, "0"), "~")[0]  # noqa: E731
                 if sport == "nba":
                     p.update(min=num("minutes"), pts=num("points"), reb=num("rebounds"), ast=num("assists"),
@@ -156,7 +167,7 @@ def parse_boxscore(sport: str, j: dict) -> dict:
     wp = j.get("winprobability") or []
     home_wp = wp[-1].get("homeWinPercentage") if wp else None
     home_wp0 = wp[0].get("homeWinPercentage") if wp else None
-    return {"players": players, "home_wp": None if home_wp is None else float(home_wp),
+    return {"players": players, "names": names, "home_wp": None if home_wp is None else float(home_wp),
             "home_wp0": None if home_wp0 is None else float(home_wp0)}
 
 
@@ -407,6 +418,11 @@ def leg_view(leg: dict, sd: dict | None = None, fresh: dict | None = None) -> di
             return out
         if row is None and not box["players"]:
             out.update(status="live", need="waiting for the box score")
+            return out
+        if row is None and sport == "nba":
+            # an NBA box score lists everyone who has played: a missing player has not come on yet or is not
+            # playing tonight. Treating that as zero so far would write the pick off; if he sits out it is void.
+            out.update(status="live", need="not in the box score so far: if he does not play, this pick is void and drops out")
             return out
         value = float((row or {}).get(mk, 0.0))  # in the game but nothing recorded in this stat yet
         out["current"] = value

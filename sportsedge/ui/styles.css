@@ -301,6 +301,7 @@ table.t th.c-add, table.t td.c-add { width: 44px; padding-right: 0; }
 .plcards { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 10px; }
 .plcard { display: grid; gap: 10px; padding: 12px; border-radius: 14px; background: var(--surface-2); align-content: start; }
 .pl-nums { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.pl-nums.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .pl-nums span { display: block; font-size: 10.5px; color: var(--muted); }
 .pl-nums b { font-size: 15px; font-variant-numeric: tabular-nums; }
 
@@ -431,6 +432,61 @@ table.board .side-btn { width: auto; }
 .tip .r { display: flex; align-items: center; gap: 8px; }
 .tip .r b { font-variant-numeric: tabular-nums; }
 .tip .r .k { width: 12px; height: 2px; border-radius: 2px; }
+
+/* ------------------------------------------------------------------ games that have started */
+.game.started { border-color: color-mix(in srgb, var(--neg) 40%, transparent); }
+.game.started .g-hd .sc-live { margin: 0; }
+.slip .item .sline { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; margin-top: 4px; font-size: 12px; color: var(--ink-2); font-weight: 600; }
+.slip .item .sline input { width: 86px; padding: 4px 8px; }
+.sc-rec { justify-self: start; font-size: 12.5px; font-weight: 700; }
+.st-score { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: 0 0 10px; font-size: 13px; color: var(--ink-2); }
+.st-score b { font-size: 17px; color: var(--ink); font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+.st-score .sc-live { margin: 0; }
+.gp-line small { display: block; font-size: 10.5px; font-weight: 700; color: var(--ink-2); white-space: nowrap; }
+.gp-line small.hit { color: var(--pos); }
+/* box score under a game on the scoreboard: the card takes the full row while it is open */
+.sc-box > summary { cursor: pointer; font-size: 12.5px; font-weight: 700; color: var(--accent-ink); }
+.sc:has(.sc-box[open]) { grid-column: 1 / -1; }
+.bx { margin-top: 4px; font-variant-numeric: tabular-nums; }
+.bx-team { display: flex; align-items: center; gap: 7px; font-weight: 800; font-size: 13px; margin: 10px 0 2px; }
+.bx-row { display: grid; grid-template-columns: minmax(0, 1fr) repeat(7, 38px); gap: 2px; font-size: 12.5px; padding: 4px 0; border-bottom: 1px solid var(--grid); }
+.bx.n5 .bx-row { grid-template-columns: minmax(0, 1fr) repeat(5, 46px); }
+.bx-row > span:not(.bx-name) { text-align: right; }
+.bx-row.bx-hd { font-size: 10px; color: var(--muted); font-weight: 700; border-bottom: 0; padding-bottom: 0; }
+.bx-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+@media (max-width: 480px) { .bx-row { grid-template-columns: minmax(0, 1fr) repeat(7, 30px); font-size: 12px; } .bx.n5 .bx-row { grid-template-columns: minmax(0, 1fr) repeat(5, 40px); } }
+
+/* ------------------------------------------------------------------ top picks in a game, suggested parlays */
+.tp { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--grid); }
+.tp-list { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 6px; }
+.tp-row { display: grid; grid-template-columns: 32px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 7px 10px 7px 8px; border-radius: 12px; background: var(--surface-2); }
+.tp-main { min-width: 0; }
+.tp-main .pick { font-size: 13.5px; overflow-wrap: anywhere; }
+.tp-sub { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 8px; margin-top: 2px; font-size: 12px; font-variant-numeric: tabular-nums; }
+.tp-chance { text-align: right; font-weight: 800; font-size: 16px; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.tp-chance small { display: block; font-size: 10px; font-weight: 600; color: var(--muted); }
+.gpar { margin-top: 8px; }
+.gpar > summary { cursor: pointer; font-size: 12.5px; font-weight: 700; color: var(--accent-ink); padding: 4px 0; }
+.gpar[open] > summary { margin-bottom: 6px; }
+.play { border: 1px solid transparent; }
+.play-hd { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; }
+.play-hd .tier { font-weight: 800; padding: 2px 10px; border-radius: 999px; font-size: 12px; background: var(--surface-3); }
+.play.t-safe .tier { background: var(--pos-wash); color: var(--pos); }
+.play.t-mid .tier { background: var(--accent-wash); color: var(--accent-ink); }
+.play.t-long .tier { background: var(--warn-bg); color: var(--warn-ink); }
+.play-hd .muted { font-size: 12px; }
+.play-hd .pay { margin-left: auto; font-size: 19px; font-weight: 800; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.play-legs { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.play-legs li { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; font-size: 13px; }
+.play-legs .pick { min-width: 0; overflow-wrap: anywhere; }
+.play-legs .muted { font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.play-note { margin: 0; font-size: 12px; color: var(--ink-2); }
+.play .btn { justify-self: start; }
+.play-scope { margin: 14px 0 8px; font-size: 14px; font-weight: 800; }
+.play-scope:first-of-type { margin-top: 8px; }
+.play-scope .muted { font-weight: 500; font-size: 12.5px; }
+.play-pick { display: flex; align-items: center; gap: 8px; margin: 8px 0 10px; font-size: 13px; font-weight: 700; }
+.play-pick select { flex: 1; min-width: 0; max-width: 420px; }
 
 /* ------------------------------------------------------------------ a recorded pick against the line now */
 .since { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 8px; margin-top: 6px; font-size: 12.5px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
