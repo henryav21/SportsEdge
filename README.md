@@ -32,8 +32,8 @@ odds, injuries and weather and reruns everything.
 
 | Page | What's there |
 |---|---|
-| **Today** | Value bets, most-likely picks (games and props), suggested parlays, and a card per game: the sportsbook's line beside the model's own number, win chance, QB, weather and back-to-back context, and the biggest model factors. |
-| **Player props** | A prop board laid out like a sportsbook's: player, stat, line, Over and Under. Beside each line is the simulator's projection and how far it disagrees with the book. Also the test results for the prop simulator, a form to price a line from your own sportsbook, and the full projection table. |
+| **Today** | Value bets, most-likely picks (games and props) and suggested parlays, then every game as one block laid out like a sportsbook: the two teams with moneyline, over/under and spread, and that game's player props underneath, with chips to switch stat. Games are grouped by day. |
+| **Player props** | Every prop line, **by game** (each game a section, grouped by stat or by player) or as a **ranked list** across all games (most likely, value, biggest disagreements). Also the test results for the prop simulator, a form to price a line from your own sportsbook, and the full projection table. |
 | **Live** | Every bet you recorded as it stands right now, pick by pick, with real scores and stat lines, what the bet is worth, and a check on your sportsbook's cash-out offer. |
 | **Results** | How logged picks have done: units won over time, a chart of predicted vs actual win rates, results by list and bet type, closing-line value, and **My bets**. |
 | **How it works** | The steps behind a pick, the game model's record against closing lines, the prop simulator's record against real lines, and every factor's learned weight. |
@@ -76,11 +76,13 @@ bet is worth and says hold or cash out.
   out makes sense for you. It uses the same risk setting that sizes stakes (quarter Kelly).
 - It also shows how low the chance of winning would have to be for the offer to be the better deal.
 
-The scores and stats are real. The live chances are **rough estimates**, simpler than the pre-game models:
-- moneylines use ESPN's own live win probability;
+The scores and stats are real. The live chances are **rough estimates**, simpler than the pre-game models.
+Each one starts, at the opening tip or kick-off, exactly at the pick's pre-game chance, and moves only
+with the score, the clock and the stat line:
+- moneylines follow ESPN's live win probability, shifted to start from the pre-game chance;
 - spreads and totals assume the rest of the game is played at the pre-game pace, with less uncertainty
   as the clock runs down;
-- props assume the player keeps producing at a blend of his projection and tonight's pace.
+- props assume the player keeps producing at a blend of his pre-game expectation and tonight's pace.
 
 They do not know about foul trouble, injuries during the game, blowouts or who has the ball.
 

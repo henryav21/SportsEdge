@@ -4,11 +4,14 @@ For every leg of a bet this works out where it stands right now (score, clock, t
 whether its result is already decided, and a rough chance that it still wins. From those it values the
 whole bet, so an offer to cash out can be compared with what the bet is actually worth.
 
-The live chances are estimates, simpler than the pre-game models:
-  - moneylines use ESPN's own live win probability when it is published;
+The live chances are estimates, simpler than the pre-game models. Every one of them starts, at the opening
+tip or kick-off, exactly at the pick's pre-game chance, and moves from there only because of the score, the
+clock and the stat line:
+  - moneylines follow ESPN's live win probability, shifted so that it starts from the pre-game chance (the
+    shift fades as the game goes on);
   - spreads and totals assume the rest of the game plays out at the pre-game pace, with the uncertainty
     shrinking as the clock runs down (the standard random-walk model of a score);
-  - player props assume the player keeps producing at a blend of his pre-game projection and tonight's pace.
+  - player props assume the player keeps producing at a blend of his pre-game expectation and tonight's pace.
 They ignore foul trouble, blowouts, injuries during the game and who has the ball, so treat them as a guide.
 """
 from __future__ import annotations
@@ -135,7 +138,9 @@ def parse_boxscore(sport: str, j: dict) -> dict:
             p["anytime_td"] = p.pop("_td", 0.0)
     wp = j.get("winprobability") or []
     home_wp = wp[-1].get("homeWinPercentage") if wp else None
-    return {"players": players, "home_wp": None if home_wp is None else float(home_wp)}
+    home_wp0 = wp[0].get("homeWinPercentage") if wp else None
+    return {"players": players, "home_wp": None if home_wp is None else float(home_wp),
+            "home_wp0": None if home_wp0 is None else float(home_wp0)}
 
 
 def boxscore(sport: str, event_id: str) -> dict:
@@ -143,7 +148,7 @@ def boxscore(sport: str, event_id: str) -> dict:
         try:
             return parse_boxscore(sport, sources._get(f"{SITE}/{sources.ESPN_PATH[sport]}/summary", {"event": event_id}, tries=2))
         except RuntimeError:
-            return {"players": {}, "home_wp": None}
+            return {"players": {}, "home_wp": None, "home_wp0": None}
 
     return _fresh(("box", sport, event_id), fetch)
 
@@ -192,6 +197,28 @@ def _over(mean: float, sd: float, thr: float) -> tuple[float, float]:
     return 1.0 - _phi((thr - mean) / sd), 0.0
 
 
+def _solve(fn, target: float, lo: float, hi: float) -> float:
+    """The x in [lo, hi] at which the increasing function fn reaches target (bisection)."""
+    for _ in range(60):
+        mid = 0.5 * (lo + hi)
+        if fn(mid) < target:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+def _anchor_mean(p_cond: float, thr: float, sd: float, tie_is_half: bool = False) -> float:
+    """The mean of a bell curve with spread sd for which 'ends above thr, given it does not land exactly on
+    thr' has chance p_cond. A pick's pre-game chance is quoted that way (given no push). For a moneyline a
+    level score is not a push but overtime, counted as an even chance (tie_is_half)."""
+    def cond(mu):
+        over, push = _over(mu, sd, thr)
+        return over + 0.5 * push if tie_is_half else over / max(1.0 - push, 1e-9)
+
+    return _solve(cond, p_cond, thr - 8 * sd, thr + 8 * sd)
+
+
 def _poisson_at_least(lam: float, k: int) -> float:
     if k <= 0:
         return 1.0
@@ -202,15 +229,28 @@ def _poisson_at_least(lam: float, k: int) -> float:
     return max(0.0, 1.0 - cdf)
 
 
-def game_leg_chance(sport: str, leg: dict, g: dict, home_wp: float | None, sd: dict | None = None) -> tuple[float, float]:
-    """(chance the leg wins, chance it pushes) for a moneyline, spread or total, from the score and clock."""
+def _logit(p: float) -> float:
+    p = min(max(p, 0.002), 0.998)
+    return math.log(p / (1.0 - p))
+
+
+def game_leg_chance(sport: str, leg: dict, g: dict, home_wp: float | None, sd: dict | None = None,
+                    home_wp0: float | None = None) -> tuple[float, float]:
+    """(chance the leg wins, chance it pushes) for a moneyline, spread or total, from the score and clock.
+    home_wp / home_wp0: ESPN's live win chance for the home team now and at the start of the game."""
     mk, side = leg["market_key"], leg["side"]
     f = remaining_fraction(sport, g)
     margin, total = g["home_score"] - g["away_score"], g["home_score"] + g["away_score"]
     p_pre = min(max(float(leg.get("p_cond") or 1.0 / float(leg.get("dec") or 2.0)), 0.02), 0.98)
     sds = {**SD[sport], **(sd or {})}
     if mk == "ml" and home_wp is not None and g["state"] == "in":
-        return (home_wp if side == "home" else 1.0 - home_wp), 0.0
+        now = home_wp if side == "home" else 1.0 - home_wp
+        if home_wp0 is None:
+            return now, 0.0
+        # ESPN's model starts the game at its own number; this tool's pre-game chance is anchored to the
+        # sportsbook. Carry that difference into the game and let it fade as the clock runs down.
+        start = home_wp0 if side == "home" else 1.0 - home_wp0
+        return 1.0 / (1.0 + math.exp(-(_logit(now) + f * (_logit(p_pre) - _logit(start))))), 0.0
     # every game leg is "some number ends above a threshold": y is that number now, thr the threshold
     if mk == "total":
         s0, sign = sds["total"], (1.0 if side == "over" else -1.0)
@@ -218,13 +258,9 @@ def game_leg_chance(sport: str, leg: dict, g: dict, home_wp: float | None, sd: d
     else:
         s0, sign = sds["margin"], (1.0 if side == "home" else -1.0)
         y, thr = sign * margin, (0.0 if mk == "ml" else -float(leg["line"]))
-    if mk == "total":
-        # the pre-game expected total, read back from the pre-game chance of this side
-        mu_pre = float(leg["line"]) + sign * s0 * _phi_inv(p_pre)
-        mean = y + sign * mu_pre * f
-    else:
-        mu_pre = thr + s0 * _phi_inv(p_pre)  # pre-game expected value of y
-        mean = y + mu_pre * f
+    # what y was expected to end on before the game, read back from the pick's pre-game chance;
+    # the part of the game still to play is expected to add its share of that
+    mean = y + _anchor_mean(p_pre, thr, s0, tie_is_half=(mk == "ml")) * f
     if f <= 0:
         return (1.0 if y > thr else 0.0), (1.0 if abs(y - thr) < 1e-9 else 0.0)
     p_win, p_push = _over(mean, s0 * math.sqrt(f), thr)
@@ -233,18 +269,36 @@ def game_leg_chance(sport: str, leg: dict, g: dict, home_wp: float | None, sd: d
     return p_win, p_push
 
 
-def _prop_spread(mu: float, line: float, p_over: float, yards: bool) -> float:
-    """Pre-game spread of a player's stat: read back from the pre-game chance when that is usable,
-    otherwise a typical value for a stat of that size."""
-    typical = max(0.55 * mu + 4.0, 6.0) if yards else max(math.sqrt(1.6 * max(mu, 0.3)), 0.7)
-    z = _phi_inv(1.0 - min(max(p_over, 0.03), 0.97))
-    if abs(z) > 0.15 and (line - mu) / z > 0:
-        return min(max((line - mu) / z, 0.5 * typical), 2.0 * typical)
-    return typical
+def stat_spread(mk: str, size: float) -> float:
+    """Typical game-to-game spread (standard deviation) of a stat for a player who averages `size`.
+    Round figures from box scores: a 23-point scorer swings by about 8 points, a 60-yard receiver by about
+    36 yards, a 240-yard passer by about 70."""
+    if mk == "pass_yds":
+        return max(0.27 * size + 5.0, 20.0)
+    if mk not in COUNTS:                                   # rushing and receiving yards
+        return max(0.5 * size + 6.0, 8.0)
+    k = 3.0 if mk in ("pts", "pra", "pr", "pa") else 1.8   # points come in twos and threes, so they swing more
+    return max(math.sqrt(k * max(size, 0.3)), 0.7)
+
+
+def _poisson_rate_for(p_cond: float, line: float) -> float:
+    """The Poisson rate at which 'ends above the line, given it does not land exactly on it' has chance p_cond."""
+    need, whole = math.floor(line) + 1, abs(line - round(line)) < 1e-9
+
+    def cond(lam):
+        over = _poisson_at_least(lam, need)
+        push = (_poisson_at_least(lam, need - 1) - over) if whole else 0.0
+        return over / max(1.0 - push, 1e-9)
+
+    return _solve(cond, p_cond, 1e-6, max(4.0 * need + 20.0, 20.0))
 
 
 def prop_leg_chance(leg: dict, value: float, f: float) -> tuple[float, float]:
-    """(chance the leg wins, chance it pushes) for a player prop, from his stat line and the time left."""
+    """(chance the leg wins, chance it pushes) for a player prop, from his stat line and the time left.
+
+    The pick's pre-game chance fixes what the player was expected to do over the whole game, so with nothing
+    played and nothing recorded this returns that pre-game chance. From there the expectation for the rest
+    of the game is a blend of that pre-game rate and tonight's pace."""
     mk, side, line = leg["market_key"], leg["side"], float(leg["line"])
     p_side = min(max(float(leg.get("p_cond") or 1.0 / float(leg.get("dec") or 2.0)), 0.02), 0.98)
     if mk == "anytime_td":
@@ -252,20 +306,24 @@ def prop_leg_chance(leg: dict, value: float, f: float) -> tuple[float, float]:
             return 1.0, 0.0
         return 1.0 - math.exp(math.log(1.0 - p_side) * f), 0.0  # touchdowns arrive at the pre-game rate
     p_over_pre = p_side if side == "over" else 1.0 - p_side
-    mu = float(leg.get("proj") if leg.get("proj") is not None and not pd.isna(leg.get("proj")) else line)
+    size = float(leg.get("proj") if leg.get("proj") is not None and not pd.isna(leg.get("proj")) else line)
     yards = mk not in COUNTS
+    spread0 = stat_spread(mk, size)  # how spread out this stat is for a player of this size
+    small = not yards and spread0 * spread0 < 9.0  # threes, steals, receptions: whole events, not a bell curve
     if f <= 0:
         over, push = (1.0 if value > line else 0.0), (1.0 if abs(value - line) < 1e-9 else 0.0)
     else:
+        whole = abs(line - round(line)) < 1e-9
+        # the full-game expectation that the pick's pre-game chance implies
+        mu = _poisson_rate_for(p_over_pre, line) if small else _anchor_mean(p_over_pre, line, spread0)
         pace = value / max(1.0 - f, 0.15) if f < 0.9 else mu
-        rest = f * ((1 - PACE_WEIGHT) * mu + PACE_WEIGHT * pace)  # expected production from here
-        spread = _prop_spread(mu, line, p_over_pre, yards) * math.sqrt(f)
-        if not yards and spread * spread < 9.0:  # small counts: whole events, not a bell curve
+        rest = max(f * ((1 - PACE_WEIGHT) * mu + PACE_WEIGHT * pace), 0.0)  # expected production from here
+        if small:
             need = math.floor(line - value) + 1
             over = _poisson_at_least(max(rest, 1e-6), need)
-            push = (_poisson_at_least(max(rest, 1e-6), need - 1) - over) if abs(line - round(line)) < 1e-9 else 0.0
+            push = (_poisson_at_least(max(rest, 1e-6), need - 1) - over) if whole else 0.0
         else:
-            over, push = _over(value + rest, spread, line)
+            over, push = _over(value + rest, spread0 * math.sqrt(f), line)
             if not yards and value > line:
                 over, push = 1.0, 0.0
     return (over, push) if side == "over" else (max(0.0, 1.0 - over - push), push)
@@ -347,7 +405,7 @@ def leg_view(leg: dict, sd: dict | None = None, fresh: dict | None = None) -> di
     else:
         margin, total = g["home_score"] - g["away_score"], g["home_score"] + g["away_score"]
         out["current"] = total if mk == "total" else (margin if side == "home" else -margin)
-        p_win, p_push = game_leg_chance(sport, {**leg, "p_cond": p_pre}, g, box.get("home_wp"), sd)
+        p_win, p_push = game_leg_chance(sport, {**leg, "p_cond": p_pre}, g, box.get("home_wp"), sd, box.get("home_wp0"))
         if g["state"] == "post":
             out.update(status=settle_game(mk, side, line, margin, total)[0], decided=True)
         elif mk == "total" and line is not None and total > line:
@@ -363,11 +421,13 @@ def leg_view(leg: dict, sd: dict | None = None, fresh: dict | None = None) -> di
 
 
 def bet_view(bet: dict, sd_by_sport: dict | None = None, fresh_legs: dict | None = None) -> dict:
-    """A recorded bet as it stands now: every leg, the chance the rest come in, and what the bet is worth."""
+    """A recorded bet as it stands now: every leg, the chance the rest come in, and what the bet is worth.
+    The worth counts every way the remaining legs can go: a leg that might still push would drop out of the
+    parlay rather than lose it, so it adds its reduced payout times the chance of that."""
     legs = json.loads(bet["legs_json"]) if isinstance(bet.get("legs_json"), str) else list(bet.get("legs") or [])
     views = [leg_view(l, (sd_by_sport or {}).get(str(l["sport"]).lower()), (fresh_legs or {}).get(l.get("key"))) for l in legs]
     stake, dec = float(bet["stake"]), float(bet["dec"])
-    payout_dec, p_all, lost = dec, 1.0, False
+    payout_dec, p_all, worth, lost = dec, 1.0, 1.0, False
     for v in views:
         if v["status"] == "lost":
             lost = True
@@ -375,19 +435,20 @@ def bet_view(bet: dict, sd_by_sport: dict | None = None, fresh_legs: dict | None
             payout_dec /= (v["dec"] or 1.0)  # a pushed or void leg drops out of the parlay, as at a sportsbook
         elif not v["decided"]:
             p_all *= v["p_now"]
+            worth *= v["p_now"] + v["p_push"] / (v["dec"] or 1.0)
     n_won = sum(v["status"] == "won" for v in views)
     n_open = sum(not v["decided"] for v in views)
     payout = stake * payout_dec
     if lost:
-        status, p_all = "lost", 0.0
+        status, p_all, worth = "lost", 0.0, 0.0
     elif n_open == 0:
         status = "won" if n_won else "push"
-        p_all = 1.0
+        p_all = worth = 1.0
     else:
         status = "live" if any(v["state"] == "in" for v in views) or n_won else "pre"
     return {"id": bet.get("id"), "placed_at": bet.get("placed_at"), "label": bet.get("legs"), "n": len(views), "legs": views,
             "stake": stake, "odds": bet.get("odds"), "payout": payout, "profit_if_win": payout - stake,
-            "p_all": p_all, "value": payout * p_all, "status": status, "won": n_won, "open": n_open,
+            "p_all": p_all, "value": payout * worth, "worth_share": worth, "status": status, "won": n_won, "open": n_open,
             "lost": sum(v["status"] == "lost" for v in views), "in_play": any(v["state"] == "in" for v in views),
             "same_game": len({(v["sport"], v["game"]) for v in views if not v["decided"]}) < n_open}
 

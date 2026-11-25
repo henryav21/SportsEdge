@@ -453,7 +453,7 @@ def api_cashout(req: CashOutReq):
         raise HTTPException(400, "The offer must be zero or more.")
     sd, legs = _live_context()
     v = live.bet_view(row.iloc[0].to_dict(), sd, legs)
-    return clean({**live.cash_out(req.offer, v["payout"], v["p_all"], req.bankroll, config.KELLY_FRACTION),
+    return clean({**live.cash_out(req.offer, v["payout"], v["worth_share"], req.bankroll, config.KELLY_FRACTION),
                   "bet_id": req.bet_id, "stake": v["stake"]})
 
 

@@ -58,8 +58,11 @@ class BoxScore(unittest.TestCase):
 class LiveChances(unittest.TestCase):
     def test_before_tip_off_the_chance_is_the_pre_game_chance(self):
         g0 = game("in", period=1, clock=720, home=0, away=0)  # the opening second
-        for l in (leg("spread", "home", -4.5, p=0.52), leg("total", "over", 221.5, p=0.47), leg("total", "under", 221.5, p=0.53), leg("ml", "away", p=0.35)):
-            self.assertAlmostEqual(live.game_leg_chance("nba", l, g0, None)[0], l["p_cond"], delta=0.02)
+        for l in (leg("spread", "home", -4.5, p=0.52), leg("total", "over", 221.5, p=0.47), leg("total", "under", 221.5, p=0.53),
+                  leg("ml", "away", p=0.35), leg("spread", "away", 3.0, p=0.51), leg("total", "under", 220.0, p=0.48)):
+            win, push = live.game_leg_chance("nba", l, g0, None)
+            given_no_push = win if l["market_key"] == "ml" else win / (1 - push)  # a pick's chance is quoted given no push
+            self.assertAlmostEqual(given_no_push, l["p_cond"], delta=0.003, msg=l["selection"])
 
     def test_a_big_late_lead_is_nearly_decided(self):
         late = game(period=4, clock=60, home=110, away=92)
@@ -80,13 +83,30 @@ class LiveChances(unittest.TestCase):
         self.assertAlmostEqual(live.game_leg_chance("nba", leg("ml", "home", p=0.6), g, 0.41)[0], 0.41)
         self.assertAlmostEqual(live.game_leg_chance("nba", leg("ml", "away", p=0.4), g, 0.41)[0], 0.59)
 
+    def test_the_moneyline_starts_from_the_pre_game_chance_not_the_feeds(self):
+        tip = game(period=1, clock=720, home=0, away=0)
+        # the feed opens the home team at 47%; this tool had it at 57% before the game
+        self.assertAlmostEqual(live.game_leg_chance("nba", leg("ml", "home", p=0.57), tip, 0.47, None, 0.47)[0], 0.57, places=6)
+        self.assertAlmostEqual(live.game_leg_chance("nba", leg("ml", "away", p=0.43), tip, 0.47, None, 0.47)[0], 0.43, places=6)
+        # late on, the feed's reading of the game takes over
+        late = game(period=4, clock=30, home=100, away=90)
+        self.assertAlmostEqual(live.game_leg_chance("nba", leg("ml", "home", p=0.57), late, 0.98, None, 0.47)[0], 0.98, delta=0.005)
+        mid = live.game_leg_chance("nba", leg("ml", "home", p=0.57), game(period=3, clock=720, home=50, away=50), 0.47, None, 0.47)[0]
+        self.assertTrue(0.47 < mid < 0.57)
+
     def test_a_whole_number_total_can_push(self):
         final = game("post", home=110, away=110)
         self.assertEqual(live.game_leg_chance("nba", leg("total", "over", 220.0), final, None), (0.0, 1.0))
 
-    def test_prop_starts_near_its_pre_game_chance(self):
-        l = leg("pts", "over", 24.5, p=0.50, pkey="x", proj=24.6)
-        self.assertAlmostEqual(live.prop_leg_chance(l, 0.0, 1.0)[0], 0.50, delta=0.06)
+    def test_a_prop_starts_at_its_pre_game_chance(self):
+        # whatever the simulator's own projection says, the opening second matches the pick's pre-game chance
+        for mk, line, p, proj in (("pts", 24.5, 0.50, 24.6), ("pts", 23.5, 0.49, 20.0), ("rec_yds", 62.5, 0.58, 80.0),
+                                  ("fg3m", 2.5, 0.41, 2.9), ("receptions", 4.5, 0.55, 3.0), ("reb", 9.0, 0.47, 9.5)):
+            for side in ("over", "under"):
+                l = leg(mk, side, line, p=p, pkey="x", proj=proj)
+                win, push = live.prop_leg_chance(l, 0.0, 1.0)
+                self.assertAlmostEqual(win / (1 - push), p, delta=0.005, msg=f"{mk} {side}")  # quoted given no push
+                self.assertEqual(push > 0, line == 9.0)
 
     def test_prop_already_over_or_running_out_of_time(self):
         over = leg("pts", "over", 24.5, pkey="x", proj=24)
@@ -125,7 +145,7 @@ class BetAsItStands(unittest.TestCase):
         v = self._view(won + [last], games, {"players": {"star": {"pts": 21.0}}, "home_wp": 0.7})
         self.assertEqual((v["won"], v["open"], v["lost"], v["status"]), (5, 1, 0, "live"))
         self.assertAlmostEqual(v["payout"], 10 * 1.909 ** 6, places=4)
-        self.assertAlmostEqual(v["value"], v["payout"] * v["p_all"], places=6)
+        self.assertAlmostEqual(v["value"], v["payout"] * v["p_all"], places=6)  # a half-point line cannot push
         self.assertEqual(v["p_all"], v["legs"][-1]["p_now"])
         self.assertTrue(0.05 < v["p_all"] < 0.95)
 
@@ -138,6 +158,13 @@ class BetAsItStands(unittest.TestCase):
         self.assertEqual(v["legs"][0]["status"], "push")
         self.assertEqual(v["status"], "won")
         self.assertAlmostEqual(v["payout"], 10 * 1.909, places=4)  # paid as a single
+
+    def test_a_leg_that_might_push_adds_its_reduced_payout(self):
+        l = leg("total", "over", 220.0, p=0.5)  # whole-number line, level game late on: a push is a real possibility
+        v = self._view([l], {l["key"]: game("in", period=4, clock=20, home=110, away=108)}, {"players": {}, "home_wp": None})
+        x = v["legs"][0]
+        self.assertGreater(x["p_push"], 0.05)
+        self.assertAlmostEqual(v["value"], 10 * 1.909 * x["p_now"] + 10 * x["p_push"], places=6)  # win pays in full, a push returns the stake
 
     def test_an_over_already_reached_is_decided_before_the_final_whistle(self):
         l = leg("reb", "over", 9.5, pkey="big", proj=10)

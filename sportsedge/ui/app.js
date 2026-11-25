@@ -20,6 +20,9 @@ const S = {
   introSeen: localStorage.getItem("intro_seen") === "1",
   form: { sport: "", player: "", market: "", line: "", over: "", under: "", paste: "", from: localStorage.getItem("line_from") || "same" },
   fixOpen: null, // game whose "correct the line" form is open
+  gp: {}, gpAll: {}, whyOpen: {},            // per game: chosen stat, "show all", model details open
+  pv: localStorage.getItem("props_view") || "game", pg: localStorage.getItem("props_group") || "stat", pgOpen: null, // props page: view, grouping, open games
+  focusGame: null, focusForm: false,
   live: null, liveErr: null, liveFirst: {}, offers: JSON.parse(localStorage.getItem("offers") || "{}"), cash: {},
   priceErrors: [],
   pb: { tab: "", game: "", stat: "", q: "", limit: 40 }, // prop board
@@ -295,7 +298,15 @@ function pageSlate() {
   }[S.parlayTab];
   const ltabs = [["all", "Everything"], ["games", "Game bets"], ["props", "Player props"]];
 
-  const games = sports.flatMap((s) => s.games.map((g) => gameCard(g, s, both)));
+  const sched = sports.flatMap((s) => s.games.map((g) => ({ g, s }))).sort((a, b) => String(a.g.start).localeCompare(String(b.g.start)));
+  const dayKey = (iso) => new Date(iso).toDateString();
+  const today0 = new Date().toDateString(), tomorrow0 = new Date(Date.now() + 86400000).toDateString();
+  const dayLabel = (iso) => { const k = dayKey(iso), d = new Date(iso).toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" }); return k === today0 ? `Today · ${d}` : k === tomorrow0 ? `Tomorrow · ${d}` : d; };
+  const days = [];
+  for (const x of sched) { const k = dayKey(x.g.start); if (!days.length || days[days.length - 1].k !== k) days.push({ k, label: dayLabel(x.g.start), items: [] }); days[days.length - 1].items.push(x); }
+  const games = days.map((d) => `<h3 class="day-hd">${d.label} <span class="muted">${d.items.length} game${d.items.length === 1 ? "" : "s"}</span></h3>
+    <div class="games">${d.items.map(({ g, s }) => gameCard(g, s, both)).join("")}</div>`);
+  const strip = sched.length > 3 ? `<nav class="gstrip" aria-label="Jump to a game">${sched.map(({ g, s }) => `<button data-act="jump" data-to="g-${s.sport}-${esc(g.game_id)}">${esc(g.away)} @ ${esc(g.home)} <span class="muted">${new Date(g.start).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" })}</span></button>`).join("")}</nav>` : "";
   const intro = S.introSeen ? "" : `<div class="banner intro"><div><b>How to read this page.</b>
       Each pick shows the <b>win chance</b> (the tool's estimate) next to the <b>book's chance</b> (what the odds imply after the sportsbook's fee is removed).
       When the win chance is clearly higher, the pick is rated <span class="rate r-value">Value</span>. Most picks are not: sportsbook prices are accurate, and a pick can be likely to win and still be a poor bet.
@@ -322,8 +333,9 @@ function pageSlate() {
       <div class="right"><div class="seg" role="group" aria-label="Type of parlay">${ptabs.map(([k, l]) => `<button data-act="ptab" data-tab="${k}" class="${S.parlayTab === k ? "on" : ""}">${l} <span class="muted">${(S.slate.parlays[k] || []).length}</span></button>`).join("")}</div></div></div>
     <div class="bd"><p class="note" style="margin:0 0 6px">${pblurb}</p>${parlayTable(parlays)}</div></section>
   <h2 class="sec-title" id="sec-games">Games <span class="muted">${nGames}</span></h2>
-  <p class="note sec-note">Each card compares the sportsbook's line with the model's own number. Click any bet to add it to the slip. A green dot marks a value bet.</p>
-  <div class="games">${games.join("") || '<div class="empty">No games.</div>'}</div>
+  <p class="note sec-note">Each game shows the sportsbook's prices with the tool's win chance, then that game's player props underneath. Click any price to add it to the bet slip. A green dot marks a value bet.</p>
+  ${strip}
+  ${games.join("") || '<div class="empty">No games.</div>'}
   <section class="card" style="margin-top:18px" id="sec-all"><details id="allBets" ${S.all.open ? "open" : ""}><summary class="hd" style="cursor:pointer"><h2>All priced bets</h2><span class="sub">${legs.length.toLocaleString()} bets · search and sort everything · click to ${S.all.open ? "hide" : "show"}</span></summary>
     <div class="bd">${allBetsTable(legs, both)}</div></details></section>`;
 }
@@ -341,9 +353,27 @@ function parlayTable(rows) {
     .join("")}</tbody></table></div>`;
 }
 
+/* A price in a game's main grid: click to add it to the bet slip. */
+function mkBtn(l, main, sub) {
+  if (!l) return `<span class="mk-none">–</span>`;
+  const on = inSlip(l.key);
+  return `<button class="mk-btn ${on ? "on" : ""} ${isValue(l) ? "val" : ""}" data-act="toggle" data-key="${esc(l.key)}" aria-label="${on ? "Remove" : "Add"} ${esc(l.selection)}, ${fmtOdds(l.odds)}"
+    title="${esc(l.selection)}: win chance ${pct(l.p_cond)} · book's chance ${pct(l.p_fair)} · expected return ${spct(l.ev)} (${RATINGS[ratingOf(l)][0]})">
+    <span class="mk-main">${isValue(l) ? '<span class="ev-dot" aria-label="value bet"></span>' : ""}${main}</span><span class="mk-sub">${sub}</span></button>`;
+}
+
+/* One game, laid out like a sportsbook: the two teams with moneyline, over/under and spread, then the
+   game's player props underneath in the same component. */
 function gameCard(g, s, showSport) {
+  const id = `${s.sport}|${g.game_id}`;
   const legs = s.legs.filter((l) => l.game_id === g.game_id && !isProp(l));
-  const nProps = s.legs.filter((l) => l.game_id === g.game_id && isProp(l)).length / 2 + (s.prop_lines || []).filter((p) => p.game_id === g.game_id).length;
+  const find = (m, side) => legs.find((l) => l.market === m && l.side === side);
+  const ml = { home: find("Moneyline", "home"), away: find("Moneyline", "away") };
+  const sp = { home: find("Spread", "home"), away: find("Spread", "away") };
+  const tot = { over: find("Total", "over"), under: find("Total", "under") };
+  const mlBtn = (l) => mkBtn(l, l ? fmtOdds(l.odds) : "", l ? `${pct(l.p_cond, 0)} to win` : "");
+  const spBtn = (l) => mkBtn(l, l ? signed(l.line, Math.abs(l.line) % 1 ? 1 : 0) : "", l ? `${fmtOdds(l.odds)} · ${pct(l.p_cond, 0)}` : "");
+  const totBtn = (l, tag) => mkBtn(l, l ? `${tag} ${lineNum(l.line)}` : "", l ? `${fmtOdds(l.odds)} · ${pct(l.p_cond, 0)}` : "");
   const ctx = [];
   if (s.sport === "nfl") {
     if (g.qb_away || g.qb_home) ctx.push(`QB ${esc(g.qb_away)} / ${esc(g.qb_home)}`);
@@ -351,7 +381,6 @@ function gameCard(g, s, showSport) {
     else if (g.temp != null) ctx.push(`${Math.round(g.temp)}°F · wind ${Math.round(g.wind || 0)} mph${g.precip > 0.5 ? ` · rain ${num(g.precip)} mm` : ""}`);
   } else if (g.b2b && g.b2b.length) ctx.push(`Second night of a back-to-back: ${g.b2b.map(esc).join(", ")}`);
   if (legs.some((l) => l.flag)) ctx.push(chip("news"));
-  const p = g.p_home ?? 0.5;
   const drivers = (g.drivers || []).slice(0, 4);
   const maxAbs = Math.max(3, ...drivers.map((d) => Math.abs(d[1])));
   const drv = drivers
@@ -361,27 +390,21 @@ function gameCard(g, s, showSport) {
       return `<span title="${esc(name)}">${esc(name)}</span><span class="track"><span class="zero"></span><span class="b" style="${style}"></span></span><span class="v">${signed(v)}</span>`;
     })
     .join("");
-  const groups = [["Moneyline", "To win"], ["Spread", "Spread"], ["Total", "Total points"]];
-  const legBtns = groups.map(([m, label]) => {
-    const ls = legs.filter((l) => l.market === m);
-    if (!ls.length) return "";
-    return `<div class="leg-row"><span class="leg-lab">${label}</span>${ls.map((l) => `<button class="leg-btn ${inSlip(l.key) ? "on" : ""}" data-act="toggle" data-key="${esc(l.key)}"
-        title="${esc(l.selection)}: win chance ${pct(l.p_cond)} · book's chance ${pct(l.p_fair)} · expected return ${spct(l.ev)} (${RATINGS[ratingOf(l)][0]})">
-      <span>${isValue(l) ? '<span class="ev-dot" aria-label="value bet"></span>' : ""}${esc(l.selection.replace(/ ML$/, ""))}</span><span class="o">${fmtOdds(l.odds)} · ${pct(l.p_cond, 0)}</span></button>`).join("")}</div>`;
-  }).join("");
-  return `<article class="game">
+  return `<article class="game" id="g-${s.sport}-${esc(g.game_id)}">
     <div class="g-hd">${showSport ? `<span class="badge">${s.sport.toUpperCase()}</span>` : ""}<span class="m">${esc(g.away)} @ ${esc(g.home)}</span>${g.edited ? '<span class="rate r-lean" title="You corrected this game\'s line. It is kept until the feed changes.">corrected by you</span>' : ""}<span class="time">${when(g.start)}</span></div>
-    <div class="lines"><span class="h"></span><span class="h">Sportsbook${g.edited ? " (your numbers)" : ""}</span><span class="h">Model's own number</span>
-      <span class="muted">Spread</span><span class="v">${favLine(g.home, g.away, g.mkt_margin)}</span><span class="v">${favLine(g.home, g.away, g.model_margin)}</span>
-      <span class="muted">Total</span><span class="v">${num(g.mkt_total)}</span><span class="v">${num(g.model_total)}</span></div>
-    <div><div class="mini-lab">Win chance</div><div class="wp" aria-label="Win chance: ${esc(g.away)} ${pct(1 - p, 0)}, ${esc(g.home)} ${pct(p, 0)}">
-      <span>${esc(g.away)} ${pct(1 - p, 0)}</span>
-      <span class="bar"><span style="width:${(1 - p) * 100}%;background:var(--s2)"></span><span style="width:${p * 100}%;background:var(--s1)"></span></span>
-      <span>${pct(p, 0)} ${esc(g.home)}</span></div></div>
+    <div class="mkt" role="table" aria-label="Main bets for ${esc(g.away)} at ${esc(g.home)}">
+      <span></span><span class="mk-h">Moneyline</span><span class="mk-h">Over / Under</span><span class="mk-h">Spread</span>
+      <span class="mk-team">${esc(g.away)}</span>${mlBtn(ml.away)}${totBtn(tot.over, "O")}${spBtn(sp.away)}
+      <span class="mk-team">${esc(g.home)}</span>${mlBtn(ml.home)}${totBtn(tot.under, "U")}${spBtn(sp.home)}
+    </div>
     ${ctx.length ? `<div class="chips">${ctx.map((c) => (c.startsWith("<span class=\"rate") ? c : `<span class="chip">${c}</span>`)).join("")}</div>` : ""}
-    ${drv ? `<div><div class="mini-lab">What moves the model most <span class="muted">(points toward ${esc(g.home)} →)</span></div><div class="drivers">${drv}</div></div>` : ""}
-    <div class="leg-rows"><div class="mini-lab">Bets <span class="muted">(odds · win chance)</span></div>${legBtns}</div>
-    ${nProps ? `<button class="linkish game-props" data-act="game-props" data-sport="${s.sport}" data-game="${esc(g.game_id)}">${Math.round(nProps)} player props for this game →</button>` : ""}
+    <details class="why" data-why="${esc(id)}" ${S.whyOpen[id] ? "open" : ""}><summary>The model's own numbers: ${favLine(g.home, g.away, g.model_margin)}, total ${num(g.model_total)}</summary>
+      <div class="lines"><span class="h"></span><span class="h">Sportsbook${g.edited ? " (your numbers)" : ""}</span><span class="h">Model's own number</span>
+        <span class="muted">Spread</span><span class="v">${favLine(g.home, g.away, g.mkt_margin)}</span><span class="v">${favLine(g.home, g.away, g.model_margin)}</span>
+        <span class="muted">Total</span><span class="v">${num(g.mkt_total)}</span><span class="v">${num(g.model_total)}</span></div>
+      ${drv ? `<div class="mini-lab" style="margin-top:8px">What moves the model most <span class="muted">(points toward ${esc(g.home)} →)</span></div><div class="drivers">${drv}</div>` : ""}
+      <p class="note" style="margin:8px 0 0">The win chances above start from the sportsbook's price and move toward the model only as far as testing has justified.</p></details>
+    ${gameProps(s, g)}
     ${fixForm(g, s)}</article>`;
 }
 
@@ -450,6 +473,121 @@ function propRows(s) {
 
 const typical = (line, mean, med) => (line != null && line < 10 ? mean : med ?? mean);
 
+const STAT_ORDER = {
+  nba: ["pts", "reb", "ast", "fg3m", "pra", "pr", "pa", "ra", "stl", "blk"],
+  nfl: ["pass_yds", "pass_tds", "pass_cmp", "pass_att", "rush_yds", "rush_att", "rec_yds", "receptions", "rush_rec_yds", "anytime_td"],
+};
+
+/* Prop rows for a sport, worked out once per update: each with the player's team, plus an index by game. */
+function sportRows(s) {
+  if (s._rows) return s._rows;
+  const team = {};
+  for (const r of s.proj || []) if (r.key) team[r.key] = r.team;
+  const rows = propRows(s), byGame = new Map();
+  for (const r of rows) {
+    r.team = team[r.pkey] || "";
+    if (!byGame.has(r.game_id)) byGame.set(r.game_id, []);
+    byGame.get(r.game_id).push(r);
+  }
+  s._rows = { rows, byGame };
+  return s._rows;
+}
+
+function leanText(r) {
+  if (r.gap == null) return "";
+  const pts = Math.abs(r.gap) * 100;
+  if (pts < 1) return `<span class="lt">simulator agrees</span>`;
+  const over = r.gap >= 0;
+  return `<span class="lt" title="The simulator thinks the ${over ? "over" : "under"} is ${pts.toFixed(0)} points more likely than ${r.priced ? "the sportsbook's price says" : "an even bet"}"><i class="ldot ${over ? "o" : "u"}"></i>leans ${over ? "over" : "under"} +${pts.toFixed(0)}</span>`;
+}
+
+function propTags(r) {
+  const st = settings(), tags = [];
+  if (r.value) tags.push(chip("value"));
+  if (r.flag) tags.push(chip("news"));
+  else if (r.gap != null && Math.abs(r.gap) >= st.prop_lean) tags.push(`<span class="rate r-lean" title="The simulator disagrees with the ${r.priced ? "sportsbook" : "line"} by 15 points or more">Strong lean</span>`);
+  if (r.mine) tags.push(`<span class="badge">${r.book === "corrected" ? "corrected by you" : "your book"}</span>`);
+  return tags.join(" ");
+}
+
+/* One prop line as a row: who or what, the line, Over and Under. `label` is the player (by stat) or the stat (by player). */
+function gpRow(r, label, s) {
+  const sub = leanText(r);  // the simulator's own number is on the ranked list and the projections table
+  const buttons = r.priced
+    ? `<div class="gp-o">${sideBtn(r.over, r.yesOnly ? "Yes" : "Over")}</div><div class="gp-u">${r.yesOnly ? "" : sideBtn(r.under, "Under")}</div>`
+    : `<div class="gp-o gp-two"><button class="btn small" data-act="price-row" data-sport="${s.sport}" data-player="${esc(r.player)}" data-market="${esc(r.mkey)}" data-line="${r.line}" title="This line came without a price. Enter the odds your sportsbook shows to get an expected return.">Enter odds</button></div>`;
+  return `<div class="gp-row"><div class="gp-who">${label} ${propTags(r)}<div class="sub2">${sub}</div></div>
+    <div class="gp-line">${r.yesOnly ? "" : `<b>${lineNum(r.line)}</b>`}</div>${buttons}</div>`;
+}
+
+/* A game's player props. On the home page: the top few lines for one stat, with chips to switch stat.
+   On the Player props page (full): every line, grouped by stat or by player. */
+function gameProps(s, g, { full = false } = {}) {
+  const id = `${s.sport}|${g.game_id}`;
+  let rows = sportRows(s).byGame.get(g.game_id) || [];
+  const head = (extra) => `<div class="gp-hd"><span class="gp-title">Player props</span>${extra}</div>`;
+  if (!rows.length) return full ? `<div class="empty">No prop lines are posted for this game yet.</div>` : `<div class="gp-wrap" data-gp="${esc(id)}">${head('<span class="muted">no lines posted yet for this game</span>')}</div>`;
+  const total = rows.length;
+  if (full && S.pb.q) rows = rows.filter((r) => r.player.toLowerCase().includes(S.pb.q.toLowerCase()));
+  const order = STAT_ORDER[s.sport] || [];
+  const stats = [...order.filter((k) => rows.some((r) => r.mkey === k)), ...[...new Set(rows.map((r) => r.mkey))].filter((k) => !order.includes(k))];
+  const label = (k) => (s.markets || {})[k] || k;
+  const who = (r) => `<span class="pick">${esc(r.player)}</span>${r.team ? ` <span class="badge">${esc(r.team)}</span>` : ""}`;
+  const byLine = (a, b) => (b.line ?? 0) - (a.line ?? 0) || (b.best - a.best) || a.player.localeCompare(b.player);
+  let body;
+  if (full && S.pg === "player") {
+    const players = new Map();
+    for (const r of rows) { if (!players.has(r.pkey)) players.set(r.pkey, []); players.get(r.pkey).push(r); }
+    const rank = (rs) => { for (const k of order) { const r = rs.find((x) => x.mkey === k); if (r) return order.length - order.indexOf(k) + (r.line ?? 0) / 1000; } return 0; };
+    const list = [...players.values()].sort((a, b) => (a[0].team || "").localeCompare(b[0].team || "") || rank(b) - rank(a));
+    body = list.map((rs) => `<div class="gp-player">${who(rs[0])}<span class="muted">${rs.length} line${rs.length === 1 ? "" : "s"}</span></div>
+      ${rs.sort((a, b) => stats.indexOf(a.mkey) - stats.indexOf(b.mkey)).map((r) => gpRow(r, `<span class="gp-stat">${esc(r.market)}</span>`, s)).join("")}`).join("") || `<div class="empty">No players match.</div>`;
+    return `<div class="gp-wrap full" data-gp="${esc(id)}" data-full="1"><div class="gp-cols"><span>Player and stat</span><span>Line</span><span>Over</span><span>Under</span></div>${body}</div>`;
+  }
+  let stat = S.gp[id];
+  if (!stats.includes(stat)) stat = stats[0];
+  const mine = rows.filter((r) => r.mkey === stat).sort(byLine);
+  const limit = full || S.gpAll[id] ? mine.length : 5;
+  const chips = `<div class="gp-chips" role="group" aria-label="Stat">${stats.map((k) => `<button data-act="gp-stat" data-gp="${esc(id)}" data-stat="${esc(k)}" class="${k === stat ? "on" : ""}">${esc(label(k))}</button>`).join("")}</div>`;
+  body = mine.slice(0, limit).map((r) => gpRow(r, who(r), s)).join("") || `<div class="empty">No players match.</div>`;
+  const more = full ? "" : `<div class="gp-foot">${mine.length > 5 ? `<button class="linkish" data-act="gp-more" data-gp="${esc(id)}">${S.gpAll[id] ? "Show fewer" : `Show all ${mine.length} ${esc(label(stat))} lines`}</button>` : "<span></span>"}
+      <button class="linkish" data-act="game-props" data-sport="${s.sport}" data-game="${esc(g.game_id)}">All ${total} props for this game →</button></div>`;
+  return `<div class="gp-wrap ${full ? "full" : ""}" data-gp="${esc(id)}" ${full ? 'data-full="1"' : ""}>
+    ${full ? "" : head(`<span class="muted">${total} lines${s.prop_book ? ` · ${esc(s.prop_book)}` : ""}</span>`)}${chips}
+    <div class="gp-cols"><span>${esc(label(stat))}</span><span>Line</span><span>${mine.some((r) => r.priced) ? "Over" : ""}</span><span>${mine.some((r) => r.priced) ? "Under" : ""}</span></div>${body}${more}</div>`;
+}
+
+function redrawGameProps(id) {
+  const [sport, gid] = [id.slice(0, id.indexOf("|")), id.slice(id.indexOf("|") + 1)];
+  const s = S.slate.sports.find((x) => x.sport === sport);
+  const g = s && s.games.find((x) => String(x.game_id) === gid);
+  if (!g) return;
+  for (const el of $$(".gp-wrap")) if (el.dataset.gp === id) el.outerHTML = gameProps(s, g, { full: el.dataset.full === "1" });
+}
+
+/* Player props page, grouped by game: each game is a section with its lines by stat or by player. */
+function propsByGame(s) {
+  const by = sportRows(s).byGame;
+  const q = (S.pb.q || "").toLowerCase();
+  const games = [...s.games].sort((a, b) => String(a.start).localeCompare(String(b.start)));
+  const withLines = games.filter((g) => (by.get(g.game_id) || []).some((r) => !q || r.player.toLowerCase().includes(q)));
+  const without = games.filter((g) => !(by.get(g.game_id) || []).length);
+  if (S.pgOpen == null) S.pgOpen = withLines.length ? { [`${s.sport}|${withLines[0].game_id}`]: true } : {};
+  const sections = withLines.map((g) => {
+    const id = `${s.sport}|${g.game_id}`, n = (by.get(g.game_id) || []).length;
+    const open = q ? true : !!S.pgOpen[id];
+    const L = g.line || {};
+    const mainLine = [L.ml_home != null ? `${esc(g.home)} ${fmtOdds(L.ml_home)} / ${esc(g.away)} ${fmtOdds(L.ml_away)}` : "", L.total != null ? `O/U ${lineNum(L.total)}` : ""].filter(Boolean).join(" · ");
+    return `<section class="card pgame" id="pg-${s.sport}-${esc(g.game_id)}"><details data-pg="${esc(id)}" ${open ? "open" : ""}>
+      <summary class="hd"><h2>${esc(g.away)} @ ${esc(g.home)}</h2><span class="sub">${when(g.start)} · ${n} lines${mainLine ? ` · ${mainLine}` : ""}</span><span class="right muted caret" aria-hidden="true"></span></summary>
+      <div class="bd">${open ? gameProps(s, g, { full: true }) : ""}</div></details></section>`;
+  }).join("");
+  const strip = withLines.length > 1 ? `<nav class="gstrip" aria-label="Jump to a game">${withLines.map((g) => `<button data-act="pg-jump" data-pg="${s.sport}|${esc(g.game_id)}">${esc(g.away)} @ ${esc(g.home)} <span class="muted">${new Date(g.start).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" })}</span></button>`).join("")}</nav>` : "";
+  return `<div id="sec-board">${strip}
+    ${sections || `<section class="card"><div class="empty">${q ? "No player matches that search." : "No prop lines are posted yet."}</div></section>`}
+    ${without.length && !q ? `<p class="note">No lines posted yet for: ${without.map((g) => `${esc(g.away)} @ ${esc(g.home)}`).join(", ")}. Sportsbooks usually post them the day before a game.</p>` : ""}</div>`;
+}
+
 function sideBtn(l, label) {
   if (!l) return `<span class="muted">–</span>`;
   const on = inSlip(l.key);
@@ -471,7 +609,7 @@ function leanCell(r) {
 
 function propBoard(s) {
   const st = settings();
-  const all = propRows(s);
+  const all = sportRows(s).rows;
   const hasPriced = all.some((r) => r.priced);
   const mine = all.filter((r) => r.mine);
   const nValue = all.filter((r) => r.value).length;
@@ -615,12 +753,19 @@ function pageProps() {
       <div style="margin-top:8px"><button class="btn" data-act="price-many">Price all</button></div></details>
     ${S.priceErrors.length ? `<div class="banner warn" style="margin:12px 0 0">${S.priceErrors.map(esc).join("<br>")}</div>` : ""}`;
 
-  const nLines = propRows(s).length;
+  const nLines = sportRows(s).rows.length;
+  const byGame = S.pv !== "list";
+  const views = `<div class="seg" role="group" aria-label="View">${[["game", "By game"], ["list", "Ranked list"]].map(([k, l]) => `<button data-act="pv" data-v="${k}" class="${(byGame ? "game" : "list") === k ? "on" : ""}">${l}</button>`).join("")}</div>`;
+  const grouping = byGame ? `<div class="seg" role="group" aria-label="Inside each game, group by">${[["stat", "By stat"], ["player", "By player"]].map(([k, l]) => `<button data-act="pg" data-v="${k}" class="${S.pg === k ? "on" : ""}">${l}</button>`).join("")}</div>
+    <input type="search" placeholder="Search player" data-bind="pb.q" data-rerender="1" value="${esc(S.pb.q)}" aria-label="Search player">
+    <button class="btn small ghost" data-act="pg-all" data-v="1">Open all</button><button class="btn small ghost" data-act="pg-all" data-v="0">Close all</button>` : "";
   return `
-  ${pageHead("Player props", `Every prop line for ${SP}, with the simulator's projection beside the sportsbook's number. ${nLines ? `${nLines.toLocaleString()} lines from ${esc(s.prop_book || "your entries")}.` : "No lines posted yet."}`)}
-  <div class="filters">${seg}${jumpNav([["sec-board", "Prop board", nLines], ["sec-price", "Price your book's line"], ["sec-proj", "Projections"]])}</div>
-  ${trustCard(s)}
-  ${nLines ? propBoard(s) : `<section class="card" id="sec-board"><div class="hd"><h2>Prop board</h2></div><div class="empty"><b>No ${SP} prop lines are posted yet.</b> Sportsbooks usually post them the day before a game. You can still price a line yourself below, and the projections table has every player.</div></section>`}
+  ${pageHead("Player props", `Every prop line for ${SP}, game by game, with the simulator's projection beside the sportsbook's number. ${nLines ? `${nLines.toLocaleString()} lines from ${esc(s.prop_book || "your entries")}.` : "No lines posted yet."}`)}
+  <div class="filters">${seg}${jumpNav([["sec-board", byGame ? "Props by game" : "Ranked list", nLines], ["sec-trust", "How much to trust them"], ["sec-price", "Price your book's line"], ["sec-proj", "Projections"]])}</div>
+  <div class="filters">${views}${grouping}</div>
+  ${!nLines ? `<section class="card" id="sec-board"><div class="hd"><h2>Player props</h2></div><div class="empty"><b>No ${SP} prop lines are posted yet.</b> Sportsbooks usually post them the day before a game. You can still price a line yourself below, and the projections table has every player.</div></section>`
+    : byGame ? propsByGame(s) : propBoard(s)}
+  <div id="sec-trust">${trustCard(s)}</div>
   <section class="card" id="sec-price"><div class="hd"><h2>Price a line from your sportsbook</h2><span class="sub">find where your book is out of step with ${esc(s.prop_book || "the market")}</span></div><div class="bd">${form}</div></section>
   <section class="card" id="sec-proj"><details id="projBox" ${S.proj.open ? "open" : ""}><summary class="hd" style="cursor:pointer"><h2>${SP} projections</h2><span class="sub">average simulated stat line for every player · click to ${S.proj.open ? "hide" : "show"}</span></summary>
     <div class="bd"><div class="filters" style="margin-bottom:8px"><select data-bind="proj.team" data-rerender="1" aria-label="Team"><option value="">All teams</option>${[...new Set(proj.map((r) => r.team))].sort().map((t) => `<option ${S.proj.team === t ? "selected" : ""}>${esc(t)}</option>`).join("")}</select>
@@ -663,11 +808,11 @@ async function priceLines(lines) {
     for (const l of res.legs) {
       S.legs[l.key] = l;
       const sp = S.slate.sports.find((x) => x.sport.toUpperCase() === l.sport);
-      if (sp) sp.legs = sp.legs.filter((x) => x.key !== l.key).concat([l]);
+      if (sp) { sp.legs = sp.legs.filter((x) => x.key !== l.key).concat([l]); sp._rows = null; }
     }
     if (res.legs.length) {
       toast(`Priced ${res.legs.length} bet${res.legs.length > 1 ? "s" : ""}. See “Your lines” on the prop board.`);
-      S.pb.tab = "mine"; S.pb.game = ""; S.pb.stat = ""; S.pb.q = "";
+      S.pv = "list"; S.pb.tab = "mine"; S.pb.game = ""; S.pb.stat = ""; S.pb.q = "";
     }
   } catch (e) {
     S.priceErrors = [String(e.message || e)];
@@ -949,6 +1094,9 @@ function renderGuide() {
       <dt>${chip("poor")}</dt><dd>The sportsbook's fee outweighs any edge. This is most bets.</dd>
       <dt>${chip("news")}</dt><dd>The model is far from the sportsbook. That usually means news the model has not seen, so it is never listed as value.</dd>
     </dl>
+    <h3>Finding your way around</h3>
+    <p>On <b>Today</b>, each game is one block: the two teams with their moneyline, over/under and spread, then that game's player props underneath. Tap a stat (Points, Rebounds ...) to switch, and tap any price to add it to the bet slip.
+      The <b>Player props</b> page has every line, <b>by game</b> (grouped by stat or by player) or as a <b>ranked list</b> across all games.</p>
     <h3>Player props</h3>
     <dl class="gloss">
       <dt>Line</dt><dd>The number the sportsbook sets, for example 24.5 points. You bet on the player finishing over or under it.</dd>
@@ -1173,7 +1321,17 @@ function drawBars() {
   });
 }
 
+function redrawPropGame(id) {
+  const [sport, gid] = [id.slice(0, id.indexOf("|")), id.slice(id.indexOf("|") + 1)];
+  const s = S.slate.sports.find((x) => x.sport === sport);
+  const g = s && s.games.find((x) => String(x.game_id) === gid);
+  const box = $$("details").find((d) => d.dataset.pg === id);
+  if (g && box) $(".bd", box).innerHTML = gameProps(s, g, { full: true });
+}
+
 function afterRender() {
+  if (S.focusGame) { const el = document.getElementById(S.focusGame); S.focusGame = null; if (el) setTimeout(() => el.scrollIntoView({ block: "start", behavior: "smooth" }), 30); }
+  if (S.focusForm && S.page === "props") { S.focusForm = false; const t = $("#pf-over"); if (t) setTimeout(() => { t.scrollIntoView({ block: "center", behavior: "smooth" }); t.focus({ preventScroll: true }); }, 30); }
   if (S.page === "track" && S.track && !S.track.error) {
     const u = $("#chart-units"); if (u) lineChart(u, S.track.series);
     const c = $("#chart-cal"); if (c) calibrationChart(c, S.track.calibration);
@@ -1273,7 +1431,28 @@ document.addEventListener("click", async (e) => {
   if (act === "jump") { const t = document.getElementById(a.dataset.to); if (t) { if (t.tagName === "SECTION") { const d = $("details", t); if (d && !d.open) d.open = true; } t.scrollIntoView({ block: "start", behavior: "smooth" }); } return; }
   if (act === "sport") { S.sport = a.dataset.sport; localStorage.setItem("sport", S.sport); S.track = null; renderMain(); return; }
   if (act === "prop-sport") { S.form.market = ""; S.form.player = ""; S.form.line = ""; S.proj.team = ""; S.pb = { tab: "", game: "", stat: "", q: "", limit: 40 }; S.priceErrors = []; location.hash = `props/${a.dataset.sport}`; return; }
-  if (act === "game-props") { S.pb = { tab: "az", game: a.dataset.game, stat: "", q: "", limit: 40 }; location.hash = `props/${a.dataset.sport}`; return; }
+  if (act === "game-props") {
+    const id = `${a.dataset.sport}|${a.dataset.game}`;
+    S.pv = "game"; S.pb.q = ""; S.pgOpen = { [id]: true }; S.focusGame = `pg-${a.dataset.sport}-${a.dataset.game}`;
+    if (location.hash === `#props/${a.dataset.sport}`) renderMain(); else location.hash = `props/${a.dataset.sport}`;
+    return;
+  }
+  if (act === "gp-stat") { S.gp[a.dataset.gp] = a.dataset.stat; S.gpAll[a.dataset.gp] = false; redrawGameProps(a.dataset.gp); return; }
+  if (act === "gp-more") { S.gpAll[a.dataset.gp] = !S.gpAll[a.dataset.gp]; redrawGameProps(a.dataset.gp); return; }
+  if (act === "pv") { S.pv = a.dataset.v; localStorage.setItem("props_view", S.pv); renderMain(); return; }
+  if (act === "pg") { S.pg = a.dataset.v; localStorage.setItem("props_group", S.pg); renderMain(); return; }
+  if (act === "pg-all") {
+    const sp = S.slate.sports.find((x) => x.sport === S.form.sport);
+    S.pgOpen = {};
+    if (a.dataset.v === "1" && sp) for (const g of sp.games) S.pgOpen[`${sp.sport}|${g.game_id}`] = true;
+    renderMain(); return;
+  }
+  if (act === "pg-jump") {
+    const id = a.dataset.pg;
+    S.pgOpen = { ...(S.pgOpen || {}), [id]: true };
+    S.focusGame = `pg-${id.replace("|", "-")}`;
+    renderMain(); return;
+  }
   if (act === "toggle") { e.preventDefault(); await toggleLeg(a.dataset.key); return; }
   if (act === "clear-slip") { S.slip = []; saveSlip(); S.slipEval = null; renderSlip(); $$('[data-act="toggle"].on').forEach((b) => { b.classList.remove("on"); if (b.classList.contains("add")) b.textContent = "+"; }); return; }
   if (act === "ptab") { S.parlayTab = a.dataset.tab; renderMain(); return; }
@@ -1338,6 +1517,11 @@ document.addEventListener("click", async (e) => {
     S.form.player = a.dataset.player;
     if (a.dataset.market) S.form.market = a.dataset.market;
     if (a.dataset.line) S.form.line = a.dataset.line;
+    if (S.page !== "props") {  // from a game on the home page: open the pricing form on the Player props page
+      S.form.over = ""; S.form.under = ""; S.focusForm = true;
+      location.hash = `props/${a.dataset.sport || S.form.sport}`;
+      return;
+    }
     const set = (id, v) => { const i = $(id); if (i && v != null) i.value = v; };
     set("#pf-player", S.form.player); set("#pf-market", S.form.market); set("#pf-line", S.form.line);
     const target = act === "price-row" ? $("#pf-over") : $("#pf-line");
@@ -1394,6 +1578,12 @@ document.addEventListener("change", (e) => {
 });
 
 document.addEventListener("toggle", (e) => {
+  if (e.target.dataset && e.target.dataset.why) S.whyOpen[e.target.dataset.why] = e.target.open;
+  if (e.target.dataset && e.target.dataset.pg) {
+    const id = e.target.dataset.pg, was = !!(S.pgOpen || {})[id];
+    S.pgOpen = { ...(S.pgOpen || {}), [id]: e.target.open };
+    if (e.target.open && !was && !$(".gp-wrap", e.target)) redrawPropGame(id);  // its lines are drawn when first opened
+  }
   if (e.target.classList && e.target.classList.contains("fix")) { if (e.target.open) S.fixOpen = e.target.dataset.fix; else if (S.fixOpen === e.target.dataset.fix) S.fixOpen = null; }
   if (e.target.id === "allBets") S.all.open = e.target.open;
   if (e.target.id === "projBox") S.proj.open = e.target.open;
