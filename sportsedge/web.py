@@ -388,9 +388,29 @@ def _rung_legs(results: list[dict]) -> list[dict]:
     return [l for r in results for l in r.get("rung_legs") or []]
 
 
+def _candidates(results: list[dict]) -> list[dict]:
+    """Every pick a suggestion may use: the slate's picks the user's app offers, and the "N or more" bets.
+    An "N or more" bet the feed does not price is the same bet as its over at the same assumed price, so it
+    stands in for that over only where the over itself is marked as not on the app. Otherwise the over is the
+    pick, and the same bet is not offered under two names."""
+    slate = _every_leg(results)
+    by_key = {l["key"]: l for l in slate}
+    plus = [l for l in _rung_legs(results)
+            if not l.get("assumed") or (by_key.get(l.get("base_key")) is not None and not _offered(by_key[l["base_key"]]))]
+    return _on_offer(slate + plus)
+
+
 def _suggestions(results: list[dict]) -> dict:
     try:
-        return plays.build(_on_offer(_every_leg(results) + _rung_legs(results)))
+        cand = _candidates(results)
+        out = plays.build(cand)
+        try:  # the long shots: an extra, built from the same picks
+            out["lotto"] = plays.lottery(cand)
+            out["keys"] = sorted(set(out.get("keys") or []) | {k for sc in out["lotto"]["scopes"] for t in sc["tickets"] for k in t["leg_keys"]})
+        except Exception as e:
+            _log(f"Lottery tickets skipped: {e!r}")
+            out["lotto"] = None
+        return out
     except Exception as e:  # suggestions are an extra: the slate must still load without them
         _log(f"Suggestions skipped: {e!r}")
         return {}
@@ -775,7 +795,8 @@ def api_slate():
     used = set(sug.get("keys") or [])  # the "N or more" picks the suggestions use: the page needs only those
     rung = [{f: l.get(f) for f in RUNG_FIELDS} for l in _rung_legs(STATE["results"]) if l["key"] in used]
     out["plays"] = clean({"games": sug.get("games") or [], "groups": sug.get("groups") or [], "days": sug.get("days") or [],
-                          "lean_legs": lean, "rung_legs": rung, "assumed_odds": config.ASSUMED_PROP_ODDS})
+                          "lean_legs": lean, "rung_legs": rung, "assumed_odds": config.ASSUMED_PROP_ODDS,
+                          "lotto": sug.get("lotto")})
     out["not_offered"] = list(STATE["not_offered"].values())
     return out
 
@@ -801,7 +822,55 @@ def api_slip(req: SlipReq):
             for l in legs if l["key"] in req.lines and
             (l.get("alt_of") is not None or l.get("chance_line") is not None)}
     legs, now = _with_live(legs)
-    return clean({**parlay.evaluate(legs), "alts": alts, "live": now})
+    return clean({**parlay.evaluate(legs), "alts": alts, "live": now, "without": _without_each(legs)})
+
+
+def _without_each(legs: list[dict]) -> dict:
+    """The slip priced again with each pick left out, in turn: {pick key: {p, odds}}. It shows which pick holds a
+    parlay back most (picks from one game keep the way they move together). Only for three picks or more: with
+    two, leaving one out is just the other pick."""
+    if not 3 <= len(legs) <= 12:
+        return {}
+    out = {}
+    for i, l in enumerate(legs):
+        try:
+            e = parlay.evaluate(legs[:i] + legs[i + 1:])
+            out[l["key"]] = {"p": e["p_win_all"], "odds": e["odds"]}
+        except Exception:
+            continue
+    return out
+
+
+def held(bets: pd.DataFrame) -> dict:
+    """What the open bets already hold, without looking anything up live: for each pick and for each game, how
+    many open bets need it and what is staked on them. A parlay counts in full for every pick and game in it."""
+    picks: dict = {}
+    games: dict = {}
+    n, staked = 0, 0.0
+    if bets is not None and not bets.empty:
+        for b in bets[bets["status"] == "open"].to_dict("records"):
+            try:
+                legs = json.loads(b["legs_json"]) if isinstance(b.get("legs_json"), str) else []
+            except ValueError:
+                continue
+            if not isinstance(legs, list):  # a record that cannot be read is left out, not guessed at
+                continue
+            legs = [l for l in legs if isinstance(l, dict)]
+            stake = float(b.get("stake") or 0.0)
+            n, staked = n + 1, staked + stake
+            for key in {str(l.get("key")) for l in legs if l.get("key")}:
+                e = picks.setdefault(key, {"bets": 0, "stake": 0.0})
+                e["bets"], e["stake"] = e["bets"] + 1, e["stake"] + stake
+            for gk in {f"{str(l.get('sport', '')).lower()}|{l.get('game_id')}" for l in legs}:
+                e = games.setdefault(gk, {"bets": 0, "stake": 0.0})
+                e["bets"], e["stake"] = e["bets"] + 1, e["stake"] + stake
+    return {"picks": picks, "games": games, "open": n, "staked": staked}
+
+
+@app.get("/api/held")
+def api_held():
+    """For the bet slip's warnings and the games list: which picks and games the open bets already ride on."""
+    return clean(held(tracker.load_bets()))
 
 
 @app.post("/api/props/price")

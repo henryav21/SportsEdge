@@ -335,6 +335,14 @@ class OrMoreBetsAreMarkedOnTheirOwn(unittest.TestCase):
         self.assertFalse(web._offered(self.plus))
         self.assertTrue(web._offered({**self.plus, "player_key": "tyrese maxey"}))
 
+    def test_an_unpriced_or_more_bet_stands_in_only_for_an_over_that_is_not_offered(self):
+        # "2+ threes" with no price of its own is the over on 1.5 again: suggested under one name, never both
+        twin = {**self.plus, "assumed": True}
+        res = [{"sport": "nba", "legs": [self.over], "lean_legs": [], "rung_legs": [twin]}]
+        self.assertEqual([l["key"] for l in web._candidates(res)], [self.over["key"]])
+        web.STATE["not_offered"]["NBA|fg3m||"] = {"id": "NBA|fg3m||"}  # no over/under on threes on the app
+        self.assertEqual([l["key"] for l in web._candidates(res)], [twin["key"]])
+
     def test_the_suggestions_are_offered_the_or_more_picks_too(self):
         self.sug.stop()
         try:
@@ -345,6 +353,44 @@ class OrMoreBetsAreMarkedOnTheirOwn(unittest.TestCase):
                 self.assertEqual(web._suggestions(res)["keys"], [self.plus["key"]])
         finally:
             self.sug.start()
+
+
+class SlipCoach(unittest.TestCase):
+    """What the bet slip's coach is told: what the open bets already hold, and the slip without each pick."""
+
+    def bets(self):
+        def row(bid, stake, status, legs):
+            return {"id": bid, "stake": stake, "status": status, "legs_json": json.dumps(legs)}
+        la_ml = {"key": "NFL|G1|ml|home|", "sport": "NFL", "game_id": "G1"}
+        over = {"key": "NFL|G1|total|over|", "sport": "NFL", "game_id": "G1"}
+        hou = {"key": "NBA|E2|ml|home|", "sport": "NBA", "game_id": "E2"}
+        return pd.DataFrame([row("a", 5.0, "open", [la_ml, over]), row("b", 10.0, "open", [la_ml, hou]),
+                             row("c", 20.0, "lost", [la_ml]), row("d", 5.0, "open", "not json")])
+
+    def test_open_bets_are_counted_per_pick_and_per_game(self):
+        h = web.held(self.bets())
+        self.assertEqual((h["open"], h["staked"]), (2, 15.0))  # the settled bet and the unreadable one are left out
+        self.assertEqual(h["picks"]["NFL|G1|ml|home|"], {"bets": 2, "stake": 15.0})
+        self.assertEqual(h["picks"]["NFL|G1|total|over|"], {"bets": 1, "stake": 5.0})
+        # a parlay counts once for a game however many of its picks are from it
+        self.assertEqual(h["games"], {"nfl|G1": {"bets": 2, "stake": 15.0}, "nba|E2": {"bets": 1, "stake": 10.0}})
+
+    def test_no_bets(self):
+        self.assertEqual(web.held(pd.DataFrame()), {"picks": {}, "games": {}, "open": 0, "staked": 0.0})
+
+    def test_the_slip_is_priced_again_without_each_pick(self):
+        legs = [{"key": k} for k in ("a", "b", "c")]
+        seen = []
+
+        def fake(ls):
+            seen.append([l["key"] for l in ls])
+            return {"p_win_all": 0.1 * len(ls), "odds": 100.0 * len(ls)}
+
+        with mock.patch.object(web.parlay, "evaluate", side_effect=fake):
+            out = web._without_each(legs)
+            self.assertEqual(seen, [["b", "c"], ["a", "c"], ["a", "b"]])
+            self.assertEqual(out["a"], {"p": 0.2, "odds": 200.0})
+            self.assertEqual(web._without_each(legs[:2]), {})  # two picks: leaving one out is just the other pick
 
 
 if __name__ == "__main__":

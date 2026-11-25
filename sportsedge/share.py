@@ -187,6 +187,17 @@ def _beat(url: str, tunnel: str):
         pass
 
 
+RETRY_SECONDS = 180  # how long to wait before trying to share again after it fails
+
+
+def _forget_share():
+    """The dashboard reads this file to show the outside address: without a working one there is none to show."""
+    try:
+        (tracker.history_dir() / "share.json").unlink()
+    except Exception:
+        pass
+
+
 def run(port: int = 8765):
     if _local_ok(port):
         _say(f"Using the dashboard already running on this computer (port {port}).")
@@ -201,39 +212,45 @@ def run(port: int = 8765):
     _keep_awake(True)
     try:
         while True:
-            _say("Opening a secure tunnel ...")
-            tunnel = Tunnel(port)
-            t_url = tunnel.wait()
-            _say("Pointing your Vercel address at it (about 20 seconds) ...")
-            url = point_vercel_at(t_url)
-            _beat(url, t_url)
-            print("\n" + "=" * 68)
-            print(f"  Your dashboard, from anywhere:   {url}")
-            if locked:
-                print("  It is LOCKED: no passcode is set, so it shows a locked page to everyone.")
-                print("  In another terminal, in this folder, run:   .\\sportsedge passcode")
-            else:
-                print("  Sign in with your passcode. Sessions last 30 days per device.")
-            print("  Keep this window open. Press Ctrl+C to stop sharing.")
-            print("=" * 68 + "\n", flush=True)
-            while tunnel.alive():
-                time.sleep(20)
+            try:
+                _say("Opening a secure tunnel ...")
+                tunnel = Tunnel(port)
+                t_url = tunnel.wait()
+                _say("Pointing your Vercel address at it (about 20 seconds) ...")
+                url = point_vercel_at(t_url)
                 _beat(url, t_url)
-                if locked and access.has_passcode():
-                    locked = False
-                    _say("Passcode set: remote access is open to anyone who knows it.")
-            _say("The tunnel dropped. Reconnecting ...")
-            time.sleep(3)
+                print("\n" + "=" * 68)
+                print(f"  Your dashboard, from anywhere:   {url}")
+                if locked:
+                    print("  It is LOCKED: no passcode is set, so it shows a locked page to everyone.")
+                    print("  In another terminal, in this folder, run:   .\\sportsedge passcode")
+                else:
+                    print("  Sign in with your passcode. Sessions last 30 days per device.")
+                print("  Keep this window open. Press Ctrl+C to stop sharing.")
+                print("=" * 68 + "\n", flush=True)
+                while tunnel.alive():
+                    time.sleep(20)
+                    _beat(url, t_url)
+                    if locked and access.has_passcode():
+                        locked = False
+                        _say("Passcode set: remote access is open to anyone who knows it.")
+                _say("The tunnel dropped. Reconnecting ...")
+                time.sleep(3)
+            except RuntimeError as e:
+                # The outside address is an extra. A tunnel that will not open or a deploy that is refused (both
+                # happen when this is restarted several times in a few minutes) must not take the dashboard on
+                # this computer down with it: it keeps running here, and sharing is tried again.
+                print(f"\nCould not share the dashboard just now. It is still running on this computer: http://127.0.0.1:{port}/\n{e}", flush=True)
+                if tunnel:
+                    tunnel.stop()
+                    tunnel = None
+                _forget_share()
+                _say(f"Trying to share again in {RETRY_SECONDS // 60} minutes. Press Ctrl+C to stop.")
+                time.sleep(RETRY_SECONDS)
     except KeyboardInterrupt:
         _say("Stopped sharing. The address now shows an error page until you run this again.")
-    except RuntimeError as e:
-        print(f"\nCould not share the dashboard. Nothing is reachable from outside.\n{e}", flush=True)
-        raise SystemExit(1)
     finally:
         _keep_awake(False)
         if tunnel:
             tunnel.stop()
-        try:
-            (tracker.history_dir() / "share.json").unlink()
-        except Exception:
-            pass
+        _forget_share()
