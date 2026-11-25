@@ -78,6 +78,23 @@ def scoreboard(sport: str, day: dt.date) -> list[dict]:
     return _fresh(("sb", sport, day), fetch)
 
 
+def scores(sports=("nfl", "nba"), day: dt.date | None = None) -> list[dict]:
+    """Today's games with score and clock: in play first, then still to come, then finished. A game in play
+    also carries ESPN's own live win chance for the home team (theirs, not this tool's)."""
+    day = day or dt.date.today()
+    out = []
+    for sport in sports:
+        for g in scoreboard(sport, day):
+            row = {"sport": sport, "home_wp": None,
+                   **{k: g[k] for k in ("event_id", "home", "away", "home_score", "away_score", "state", "detail", "start")}}
+            if g["state"] == "in":
+                row["home_wp"] = boxscore(sport, g["event_id"]).get("home_wp")
+            out.append(row)
+    order = {"in": 0, "pre": 1, "post": 2}
+    out.sort(key=lambda r: (order.get(r["state"], 3), str(r["start"])))
+    return out
+
+
 def find_game(sport: str, leg: dict) -> dict | None:
     """The live game a leg belongs to. NBA legs carry ESPN's event id; NFL legs are matched on the teams."""
     try:

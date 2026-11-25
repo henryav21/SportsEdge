@@ -30,6 +30,10 @@ def game_info(sport: str, r, model, gl: list[dict], o: dict) -> dict:
         "drivers": model.explain(pd.Series(row)), "book": o.get("book"),
         # the line as the sportsbook quotes it, so it can be shown and corrected
         "line": {k: (None if o.get(k) is None or pd.isna(o.get(k)) else float(o.get(k))) for k in LINE_FIELDS},
+        # the numbers the sportsbook first posted, for "moved since it opened"
+        "open_line": {k: (None if o.get(f"open_{k}") is None or pd.isna(o.get(f"open_{k}")) else float(o.get(f"open_{k}")))
+                      for k in ("spread_home", "total", "ml_home", "ml_away")},
+        "event_id": str(getattr(r, "event_id", "") or ""),
         "edited": False,
     }
     if sport == "nfl":

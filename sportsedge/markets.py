@@ -159,6 +159,12 @@ def prop_centre(lines: pd.DataFrame, prop_sims: dict) -> dict:
     return out
 
 
+def _opt(r, name):
+    """An optional column of a line row as a float, or None when it is absent or empty."""
+    v = getattr(r, name, None)
+    return None if v is None or pd.isna(v) else float(v)
+
+
 def prop_reference(lines: pd.DataFrame) -> dict:
     """(player key, market) -> (line, no-vig chance of the over) for the reference sportsbook's lines.
     A line that came without a price (NFL) is taken as an even bet at that line."""
@@ -195,7 +201,8 @@ def prop_leans(sport: str, lines: pd.DataFrame, prop_sims: dict, games: pd.DataF
         out.append({"sport": sport.upper(), "game_id": gid, "game": f"{g.away} @ {g.home}", "start": g.start,
                     "player": r.player, "player_key": r.key, "market_key": r.market,
                     "market": labels.get(r.market, r.market), "line": line, "proj": float(np.mean(x)),
-                    "proj_med": float(np.median(x)), "p_over": pc, "book": getattr(r, "book", "") or ""})
+                    "proj_med": float(np.median(x)), "p_over": pc, "book": getattr(r, "book", "") or "",
+                    "open_line": _opt(r, "open_line")})
     return out
 
 
@@ -257,7 +264,8 @@ def prop_legs(sport: str, lines: pd.DataFrame, prop_sims: dict, games: pd.DataFr
             po = wp * sim_o + (1 - wp) * mo * (1 - pp)
         if not np.isnan(mu):
             pu = wp * sim_u + (1 - wp) * mu * (1 - pp)
-        base = {**base, "proj_med": float(np.median(x)), "sim_over": pc}
+        base = {**base, "proj_med": float(np.median(x)), "sim_over": pc, "open_line": _opt(r, "open_line"),
+                "open_over_odds": _opt(r, "open_over_odds"), "open_under_odds": _opt(r, "open_under_odds")}
         if r.market == "anytime_td":
             legs.append(_leg(base, f"{r.player} anytime TD", label, grp, r.over_odds, po, 0.0, sim_o, fo,
                              _result(x > line), line=line, proj=proj, market_key=r.market, side="yes",

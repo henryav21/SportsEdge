@@ -28,13 +28,15 @@ lines, which takes a few minutes. Later runs use the cache in `.cache/`.
 
 `.\sportsedge ui` starts a local server at http://127.0.0.1:8765 and opens it in your browser.
 Only this computer can reach it. It runs the model in the background, and **Refresh** re-downloads
-odds, injuries and weather and reruns everything.
+odds, injuries and weather and reruns everything. While it is open it also looks at the odds feed every
+3 minutes, logs any change, and reruns the picks by itself when a line has moved.
 
 | Page | What's there |
 |---|---|
-| **Today** | Value bets, most-likely picks (games and props) and suggested parlays, then every game as one block laid out like a sportsbook: the two teams with moneyline, over/under and spread, and that game's player props underneath, with chips to switch stat. Games are grouped by day. |
+| **Today** | Value bets and most-likely picks as cards (each with its win chance as a ring), suggested parlays, then every game as one block laid out like a sportsbook: the two teams with moneyline, over/under and spread, how far the line has moved since it opened, and that game's player props underneath, with chips to switch stat. Games are grouped by day. |
 | **Player props** | Every prop line, **by game** (each game a section, grouped by stat or by player) or as a **ranked list** across all games (most likely, value, biggest disagreements). Also the test results for the prop simulator, a form to price a line from your own sportsbook, and the full projection table. |
-| **Live** | Every bet you recorded as it stands right now, pick by pick, with real scores and stat lines, what the bet is worth, and a check on your sportsbook's cash-out offer. |
+| **Live** | Every bet you recorded as it stands right now, pick by pick, with real scores and stat lines, what the bet is worth, and a check on your sportsbook's cash-out offer. Below that, today's scoreboard: every game's score and clock, and ESPN's live win chance for games in play. |
+| **Line moves** | How each game's spread, total and moneyline have moved since the sportsbook first posted them: a chart per number for the game you pick, every game ranked by how far it has moved, and the player prop lines that moved most. |
 | **Results** | How logged picks have done: units won over time, a chart of predicted vs actual win rates, results by list and bet type, closing-line value, and **My bets**. |
 | **How it works** | The steps behind a pick, the game model's record against closing lines, the prop simulator's record against real lines, and every factor's learned weight. |
 
@@ -58,6 +60,18 @@ run behind the sportsbook. Check the line against your sportsbook before betting
 - For a prop, use **Price a line from your sportsbook** and say where the line is from. A DraftKings
   line that moved replaces the tool's copy and is priced on its own odds. A line from another
   sportsbook is compared with the DraftKings line, so a line or price that is out of step shows as an edge.
+
+## Line moves
+
+The feed gives each line's **opening number**, so "moved since it opened" is known for every game and
+prop straight away. Opening numbers can be posted long before a game, so big moves are common.
+- On top of that the dashboard checks the feed every 3 minutes (`ODDS_CHECK_MINUTES`) and writes a row to
+  `history/odds_log.csv` whenever a game's numbers change. The charts on the **Line moves** page are drawn
+  from that log, so they start when the dashboard first runs and fill in from there.
+- When a check finds a spread or total that differs from the one the picks were priced at, and the last
+  full update is at least 12 minutes old (`AUTO_UPDATE_MINUTES`), the picks are reworked automatically.
+- A spread is described by the team it moved toward: "−1.5 → −8.5, toward DAL" means DAL became a bigger
+  favourite.
 
 ## Live tracking and cashing out
 
@@ -281,7 +295,8 @@ edge to flag, and the seasons used.
 | `markets.py`, `parlay.py` | Pricing, market centring, EV, Kelly, parlay search |
 | `sources.py` | ESPN (schedule, odds, prop lines, injuries), Open-Meteo, The Odds API |
 | `tracker.py` | Logs picks and your bets, settles them, closing-line value, learned prop weight |
-| `live.py` | Live scores and stat lines for open bets, live chances, cash-out check |
+| `live.py` | Live scores and stat lines for open bets, live chances, cash-out check, today's scoreboard |
+| `oddslog.py` | Line movement: opening numbers, the log of every change, movement since open |
 | `web.py`, `ui/` | Local dashboard: API server plus a plain HTML/JS page (no build step) |
 | `access.py`, `share.py`, `remote/` | Passcode gate, and the tunnel plus Vercel address for reaching it from anywhere |
 | `backtest.py`, `report.py`, `cli.py` | Evaluation and output |

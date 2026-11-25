@@ -23,6 +23,7 @@ const S = {
   gp: {}, gpAll: {}, whyOpen: {},            // per game: chosen stat, "show all", model details open
   pv: localStorage.getItem("props_view") || "game", pg: localStorage.getItem("props_group") || "stat", pgOpen: null, // props page: view, grouping, open games
   focusGame: null, focusForm: false,
+  odds: null, oddsAt: 0, movesGame: null,
   live: null, liveErr: null, liveFirst: {}, offers: JSON.parse(localStorage.getItem("offers") || "{}"), cash: {},
   priceErrors: [],
   pb: { tab: "", game: "", stat: "", q: "", limit: 40 }, // prop board
@@ -33,7 +34,7 @@ const S = {
 // the address bar carries the page and, for player props, the sport (#props/nfl), so views can be bookmarked
 function readHash() {
   const [page, arg] = location.hash.slice(1).split("/");
-  S.page = ["slate", "props", "live", "track", "model"].includes(page) ? page : "slate";
+  S.page = ["slate", "props", "live", "moves", "track", "model"].includes(page) ? page : "slate";
   if (S.page === "props" && arg) S.form.sport = arg.toLowerCase();
 }
 readHash();
@@ -86,10 +87,10 @@ function isValue(l) {
   return l.ev > 0 && !l.flag && (l.edge == null || l.edge >= need);
 }
 const RATINGS = {
-  value: ["Value", "Pays more than the risk: positive expected return and a real edge over the book's price."],
+  value: ["🔥 Value", "Pays more than the risk: positive expected return and a real edge over the book's price."],
   fair: ["Fair", "Close to a fair price. Roughly break-even over many bets."],
   poor: ["Poor price", "The sportsbook's fee outweighs any edge. Loses on average, even if it usually wins."],
-  news: ["Check news", "The model is far from the sportsbook here. That usually means news the model has not seen (injury, role change)."],
+  news: ["👀 Check news", "The model is far from the sportsbook here. That usually means news the model has not seen (injury, role change)."],
 };
 function ratingOf(l) {
   if (l.flag) return "news";
@@ -101,6 +102,32 @@ const sportsShown = () => (S.slate ? S.slate.sports.filter((s) => S.sport === "a
 const inSlip = (k) => S.slip.includes(k);
 const guideLink = (text = "What do these numbers mean?") => `<button class="linkish" data-act="guide">${text}</button>`;
 const pageHead = (title, desc) => `<div class="page-hd"><h1>${title}</h1><p>${desc}</p></div>`;
+
+// ============================================================================ teams, rings
+const SPORT_ICON = { nfl: "🏈", nba: "🏀" };
+const TEAM_COLORS = {
+  nfl: { ARI: "#97233F", ATL: "#A71930", BAL: "#241773", BUF: "#00338D", CAR: "#0085CA", CHI: "#0B162A", CIN: "#FB4F14", CLE: "#311D00",
+    DAL: "#003594", DEN: "#FB4F14", DET: "#0076B6", GB: "#203731", HOU: "#03202F", IND: "#002C5F", JAX: "#006778", KC: "#E31837",
+    LV: "#000000", LAC: "#0080C6", LA: "#003594", MIA: "#008E97", MIN: "#4F2683", NE: "#002244", NO: "#D3BC8D", NYG: "#0B2265",
+    NYJ: "#125740", PHI: "#004C54", PIT: "#FFB612", SF: "#AA0000", SEA: "#002244", TB: "#D50A0A", TEN: "#4B92DB", WAS: "#5A1414" },
+  nba: { ATL: "#E03A3E", BOS: "#007A33", BKN: "#000000", CHA: "#1D1160", CHI: "#CE1141", CLE: "#860038", DAL: "#00538C", DEN: "#0E2240",
+    DET: "#C8102E", GSW: "#1D428A", HOU: "#CE1141", IND: "#002D62", LAC: "#C8102E", LAL: "#552583", MEM: "#5D76A9", MIA: "#98002E",
+    MIL: "#00471B", MIN: "#0C2340", NOP: "#0C2340", NYK: "#006BB6", OKC: "#007AC1", ORL: "#0077C0", PHI: "#006BB6", PHX: "#1D1160",
+    POR: "#E03A3E", SAC: "#5A2D81", SAS: "#C4CED4", TOR: "#CE1141", UTA: "#002B5C", WAS: "#002B5C" },
+};
+/* A team's badge: its abbreviation on its main colour, with the lettering dark or light to stay readable. */
+function teamBadge(sport, abbr, small = false) {
+  const c = (TEAM_COLORS[String(sport).toLowerCase()] || {})[abbr] || "#6a4cff";
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(c.slice(i, i + 2), 16) / 255).map((v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
+  const light = 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.42;
+  return `<span class="tb ${small ? "sm" : ""}" style="background:${c};color:${light ? "#15131f" : "#fff"}" aria-hidden="true">${esc(abbr)}</span>`;
+}
+/* Win chance as a ring: the filled share of the circle is the chance. */
+function ring(p, kind = "") {
+  const c = 2 * Math.PI * 26, v = Math.max(0, Math.min(p || 0, 1));
+  return `<div class="ring ${kind ? `k-${kind}` : ""}" role="img" aria-label="Win chance ${pct(p, 0)}"><svg viewBox="0 0 64 64"><circle class="bg" cx="32" cy="32" r="26"></circle><circle class="fg" cx="32" cy="32" r="26" stroke-dasharray="${(v * c).toFixed(1)} ${c.toFixed(1)}"></circle></svg>
+    <div class="rv"><span>${pct(p, 0)}<small>to win</small></span></div></div>`;
+}
 
 // ============================================================================ data loading
 async function poll() {
@@ -138,6 +165,7 @@ async function loadSlate() {
   saveSlip();
   if (!S.form.sport && S.slate.sports.length) S.form.sport = (S.slate.sports.find((s) => s.model) || S.slate.sports[0]).sport;
   S.track = null;
+  S.odds = null;
   await evalSlip();
   renderMain();
   renderSlip();
@@ -205,12 +233,13 @@ function renderMain() {
   });
   const main = $("#main");
   liveLoop();
+  oddsLoop();
   if (S.page === "live") { main.innerHTML = pageLive(); return; }
   if (!S.slate || !S.slate.sports.length) {
     main.innerHTML = progressView();
     return;
   }
-  const page = { slate: pageSlate, props: pageProps, live: pageLive, track: pageTrack, model: pageModel }[S.page] || pageSlate;
+  const page = { slate: pageSlate, props: pageProps, live: pageLive, moves: pageMoves, track: pageTrack, model: pageModel }[S.page] || pageSlate;
   main.innerHTML = page();
   afterRender();
 }
@@ -274,6 +303,38 @@ function legsTable(legs, { empty = "", sport = false } = {}) {
     <th class="num" title="Suggested stake (quarter-Kelly, never more than 3% of bankroll)">${S.bankroll ? "Stake" : "Stake (% of bankroll)"}</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
+/* One bet as a card: what it is, its win chance as a ring, the price, and what it returns. */
+function pickCard(l) {
+  const k = ratingOf(l), on = inSlip(l.key);
+  const stake = S.bankroll ? money(S.bankroll * l.kelly) : `${pct(l.kelly)} of bankroll`;
+  return `<article class="pcard k-${k}">
+    <div class="pc-top"><span class="pc-sport" aria-hidden="true">${SPORT_ICON[l.sport.toLowerCase()] || ""}</span>
+      <div class="pc-title"><span class="pick">${esc(l.selection)}</span><span class="sub2">${esc(l.market)} · ${esc(l.game)} · ${when(l.start)}</span></div>
+      <button class="add ${on ? "on" : ""}" data-act="toggle" data-key="${esc(l.key)}" aria-label="${on ? "Remove" : "Add"} ${esc(l.selection)} ${on ? "from" : "to"} the bet slip" title="Add to bet slip">${on ? "✓" : "+"}</button></div>
+    <div class="pc-body">${ring(l.p_cond, k)}
+      <div class="pc-stats">
+        <div title="American odds. −150: bet $150 to win $100. +130: bet $100 to win $130."><span>Odds</span><b>${fmtOdds(l.odds)}</b></div>
+        <div title="What the sportsbook's odds imply once its fee is removed"><span>Book says</span><b>${pct(l.p_fair, 0)}</b></div>
+        <div title="Average profit per $1 bet over many bets. +5% means 5 cents per dollar."><span>Return</span><b class="${cls(l.ev)}">${spct(l.ev)}</b></div>
+      </div></div>
+    <div class="pc-foot">${chip(k)}${l.edge != null ? `<span title="Win chance minus the book's chance">edge ${signed(l.edge * 100)} pts</span>` : ""}${l.ev > 0 ? `<span title="Suggested stake: quarter-Kelly, never more than 3% of bankroll">stake ${stake}</span>` : ""}</div></article>`;
+}
+const pickCards = (legs, empty) => (legs.length ? `<div class="pcards">${legs.map(pickCard).join("")}</div>` : `<div class="empty">${empty}</div>`);
+
+function parlayCards(rows) {
+  if (!rows.length) return `<div class="empty" style="padding-left:0">${S.parlayTab === "value" ? "None right now: a value parlay needs at least two value bets from different games." : "None right now."}</div>`;
+  const sgp = S.parlayTab === "sgp";
+  return `<div class="plcards">${rows.map((p, i) => `<article class="plcard">
+      <div class="legchips">${p.legs.map((x) => `<span>${esc(x)}</span>`).join("")}</div>
+      <div class="pl-nums">
+        <div title="${sgp ? "Your sportsbook sets its own price for a same-game parlay" : "The standard parlay price for these picks"}"><span>${sgp ? "Price" : "Odds"}</span><b>${sgp ? "your book's" : fmtOdds(p.odds)}</b></div>
+        <div title="The tool's chance that every pick wins"><span>Chance to hit</span><b>${pct(p.p_hit, p.p_hit < 0.1 ? 1 : 0)}</b></div>
+        <div title="Break-even odds. Only bet if your sportsbook pays more than this."><span>Fair odds</span><b>${fmtOdds(p.fair_odds)}</b></div>
+      </div>
+      <div class="pc-foot"><span>${sgp ? `these win together <b>×${num(p.lift, 2)}</b> as often as unrelated picks` : `expected return <b class="${cls(p.ev)}">${spct(p.ev)}</b>`}</span>
+        <button class="btn small" style="margin-left:auto" data-act="add-parlay" data-i="${i}">Add to slip</button></div></article>`).join("")}</div>`;
+}
+
 function pageSlate() {
   const sports = sportsShown();
   const legs = sports.flatMap((s) => s.legs);
@@ -287,14 +348,13 @@ function pageSlate() {
   const nGames = sports.reduce((n, s) => n + s.games.length, 0);
   const both = S.sport === "all" && S.slate.sports.length > 1;
   const book = gameLegs[0]?.book || "the sportsbook";
-  const propBooks = [...new Set(sports.map((s) => s.prop_book).filter(Boolean))];
 
   const parlays = (S.slate.parlays[S.parlayTab] || []).filter((p) => S.sport === "all" || p.leg_keys.every((k) => S.legs[k] && S.legs[k].sport.toLowerCase() === S.sport));
   const ptabs = [["value", "Best value"], ["safe", "Most likely to hit"], ["sgp", "Same game"]];
   const pblurb = {
-    value: "Every leg has a positive expected return and comes from a different game, so the standard parlay price applies.",
-    safe: "The combinations most likely to hit that still pay +150 or better. Usually not profitable in the long run: each added leg adds the book's fee again.",
-    sgp: "Legs from one game that tend to win together. Your sportsbook sets its own price for these: only bet if it offers better than the fair odds shown.",
+    value: "Every pick has a positive expected return and comes from a different game, so the standard parlay price applies.",
+    safe: "The combinations most likely to hit that still pay +150 or better. Usually not profitable in the long run: each added pick adds the book's fee again.",
+    sgp: "Picks from one game that tend to win together. Your sportsbook sets its own price for these: only bet if it offers better than the fair odds shown.",
   }[S.parlayTab];
   const ltabs = [["all", "Everything"], ["games", "Game bets"], ["props", "Player props"]];
 
@@ -309,50 +369,39 @@ function pageSlate() {
   const gtime = (g) => new Date(g.start).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" });
   const strip = sched.length > 3 ? `<nav class="gstrip" aria-label="Jump to a game">${sched.map(({ g, s }) => `<button data-act="jump" data-to="g-${s.sport}-${esc(g.game_id)}">${esc(g.away)} @ ${esc(g.home)} <span class="muted">${gtime(g)}</span></button>`).join("")}</nav>
     <select class="gsel" data-jump="1" aria-label="Jump to a game"><option value="">Jump to a game ...</option>${sched.map(({ g, s }) => `<option value="g-${s.sport}-${esc(g.game_id)}">${esc(g.away)} @ ${esc(g.home)} · ${gtime(g)}</option>`).join("")}</select>` : "";
-  const intro = S.introSeen ? "" : `<div class="banner intro"><div><b>How to read this page.</b>
-      Each pick shows the <b>win chance</b> (the tool's estimate) next to the <b>book's chance</b> (what the odds imply after the sportsbook's fee is removed).
-      When the win chance is clearly higher, the pick is rated <span class="rate r-value">Value</span>. Most picks are not: sportsbook prices are accurate, and a pick can be likely to win and still be a poor bet.
-      Click <b>+</b> on any pick to add it to the bet slip. ${guideLink("Open the full guide")}</div>
+  const tonight = days.length && days[0].k === today0 ? days[0].items.length : 0;
+  const nProps = propLegs.length / 2 + lineOnly;
+  const intro = S.introSeen ? "" : `<div class="banner intro"><div><b>New here?</b>
+      Each pick shows its <b>win chance</b> next to what the <b>book says</b> (the chance its odds imply, with the sportsbook's fee removed).
+      When the win chance is clearly higher, the pick is rated ${chip("value")}. Most are not: a pick can be likely to win and still be a poor bet.
+      Tap <b>+</b> or any price to add it to the bet slip. ${guideLink("Open the full guide")}</div>
       <button class="btn small" data-act="intro-ok">Got it</button></div>`;
   return `
-  ${pageHead("Today's picks", `Every upcoming game and prop, priced against the sportsbook. ${nGames} game${nGames === 1 ? "" : "s"} · game odds from ${esc(book)}${propBooks.length ? ` · props from ${esc(propBooks.join(", "))}` : ""}.
-    These lines reach the tool through ESPN's feed, which can run behind the sportsbook. If yours shows a different number, <button class="linkish" data-act="jump" data-to="sec-games">correct it on the game's card</button>.`)}
+  <section class="hero"><h1>${tonight ? `${tonight} game${tonight === 1 ? "" : "s"} today` : "Today's picks"}</h1>
+    <p>${nGames} upcoming game${nGames === 1 ? "" : "s"} and ${Math.round(nProps).toLocaleString()} player props, each priced against ${esc(book)}.</p>
+    <div class="hstats">
+      <button class="hstat" data-act="jump" data-to="sec-games"><span class="hv">${nGames}</span><span class="hl">Games</span><span class="hd2">${sports.map((s) => `${s.games.length} ${s.sport.toUpperCase()}`).join(" · ")}</span></button>
+      <button class="hstat" data-act="jump" data-to="sec-value"><span class="hv">${value.length}</span><span class="hl">Value bets</span><span class="hd2">${value.length ? `best ${esc(value[0].selection)} ${spct(value[0].ev)}` : "none right now, which is normal"}</span></button>
+      <button class="hstat" data-act="jump" data-to="sec-likely"><span class="hv">${top ? pct(top.p_cond, 0) : "–"}</span><span class="hl">Most likely pick</span><span class="hd2">${top ? `${esc(top.selection)} (${fmtOdds(top.odds)})` : "nothing priced"}</span></button>
+      <button class="hstat" data-act="nav" data-page="props"><span class="hv">${Math.round(nProps).toLocaleString()}</span><span class="hl">Player props</span><span class="hd2">${sports.filter((s) => s.model).map((s) => `${s.sport.toUpperCase()} ${(s.legs.filter(isProp).length / 2 + (s.prop_lines || []).length).toFixed(0)}`).join(" · ")}</span></button>
+    </div></section>
   <div class="filters">${sportSeg()}${jumpNav([["sec-value", "Value bets", value.length], ["sec-likely", "Most likely"], ["sec-parlays", "Parlays"], ["sec-games", "Games", nGames], ["sec-all", "All bets", legs.length]])}</div>
   ${intro}
-  <div class="tiles">
-    <div class="tile"><div class="label">Games</div><div class="value">${nGames}</div><div class="delta">${sports.map((s) => `${s.games.length} ${s.sport.toUpperCase()}`).join(" · ")}</div></div>
-    <div class="tile"><div class="label">Value bets</div><div class="value ${value.length ? "pos" : ""}">${value.length}</div><div class="delta">${value.length ? `best: ${esc(value[0].selection)} ${spct(value[0].ev)}` : "none right now, which is normal"}</div></div>
-    <div class="tile"><div class="label">Most likely pick</div><div class="value">${top ? pct(top.p_cond, 0) : "–"}</div><div class="delta">${top ? `${esc(top.selection)} (${fmtOdds(top.odds)})` : "nothing priced"}</div></div>
-    <div class="tile"><div class="label">Player props</div><div class="value">${(propLegs.length + lineOnly).toLocaleString()}</div><div class="delta">${sports.filter((s) => s.model).map((s) => `<button class="linkish" data-act="nav-sport" data-sport="${s.sport}">${s.sport.toUpperCase()}: ${(s.legs.filter(isProp).length / 2 + (s.prop_lines || []).length).toFixed(0)} lines</button>`).join(" · ")}</div></div>
-  </div>
-  <section class="card" id="sec-value"><div class="hd"><h2>Value bets</h2><span class="sub">picks where the tool's win chance beats the sportsbook's price by a real margin</span><div class="right">${guideLink()}</div></div>
-    <div class="bd flush">${legsTable(value, { sport: both, empty: `<b>No value bets right now.</b> That is the normal state. Sportsbook prices are accurate, and this tool only calls something value where testing showed a real edge, so it will not invent picks.
-      Check again closer to game time, or compare your own sportsbook's line with DraftKings on the <button class="linkish" data-act="nav" data-page="props">Player props</button> page: books disagree with each other more often than they are all wrong.` })}</div></section>
-  <section class="card" id="sec-likely"><div class="hd"><h2>Most likely to win</h2><span class="sub">highest win chance, odds no shorter than −400. Likely is not the same as profitable: check the rating.</span>
+  <section class="card" id="sec-value"><div class="hd"><h2>🔥 Value bets</h2><span class="sub">the win chance beats the sportsbook's price by a real margin</span><div class="right">${guideLink()}</div></div>
+    ${pickCards(value, `<b>No value bets right now.</b> That is the normal state. Sportsbook prices are accurate, and this tool only calls something value where testing showed a real edge, so it will not invent picks.
+      Check again closer to game time, or compare your own sportsbook's line on the <button class="linkish" data-act="nav" data-page="props">Player props</button> page.`)}</section>
+  <section class="card" id="sec-likely"><div class="hd"><h2>🎯 Most likely to win</h2><span class="sub">highest win chance, odds no shorter than −400. Likely is not the same as profitable: check the rating.</span>
       <div class="right"><div class="seg" role="group" aria-label="Type of pick">${ltabs.map(([k, l]) => `<button data-act="ltab" data-tab="${k}" class="${S.likelyTab === k ? "on" : ""}">${l}</button>`).join("")}</div></div></div>
-    <div class="bd flush">${legsTable(likely, { sport: both, empty: S.likelyTab === "props" ? "No priced props right now. NFL props come without prices: see the Player props page." : "Nothing priced." })}</div></section>
-  <section class="card" id="sec-parlays"><div class="hd"><h2>Parlays</h2><span class="sub">several picks that must all win</span>
+    ${pickCards(likely, S.likelyTab === "props" ? "No priced props right now. NFL props come without prices: see the Player props page." : "Nothing priced.")}</section>
+  <section class="card" id="sec-parlays"><div class="hd"><h2>🧩 Parlays</h2><span class="sub">several picks that must all win</span>
       <div class="right"><div class="seg" role="group" aria-label="Type of parlay">${ptabs.map(([k, l]) => `<button data-act="ptab" data-tab="${k}" class="${S.parlayTab === k ? "on" : ""}">${l} <span class="muted">${(S.slate.parlays[k] || []).length}</span></button>`).join("")}</div></div></div>
-    <div class="bd"><p class="note" style="margin:0 0 6px">${pblurb}</p>${parlayTable(parlays)}</div></section>
-  <h2 class="sec-title" id="sec-games">Games <span class="muted">${nGames}</span></h2>
-  <p class="note sec-note">Each game shows the sportsbook's prices with the tool's win chance, then that game's player props underneath. Click any price to add it to the bet slip. A green dot marks a value bet.</p>
+    <div class="bd"><p class="note" style="margin:0 0 8px">${pblurb}</p>${parlayCards(parlays)}</div></section>
+  <h2 class="sec-title" id="sec-games">🏟️ Games <span class="muted">${nGames}</span></h2>
+  <p class="note sec-note">Tap any price to add it to the bet slip. A green dot marks a value bet. These lines reach the tool through ESPN's feed, which can run behind the sportsbook: if yours shows a different number, correct it at the bottom of the game.</p>
   ${strip}
   ${games.join("") || '<div class="empty">No games.</div>'}
   <section class="card" style="margin-top:18px" id="sec-all"><details id="allBets" ${S.all.open ? "open" : ""}><summary class="hd" style="cursor:pointer"><h2>All priced bets</h2><span class="sub">${legs.length.toLocaleString()} bets · search and sort everything · click to ${S.all.open ? "hide" : "show"}</span></summary>
     <div class="bd">${allBetsTable(legs, both)}</div></details></section>`;
-}
-
-function parlayTable(rows) {
-  if (!rows.length) return `<div class="empty" style="padding-left:0">${S.parlayTab === "value" ? "None right now: a value parlay needs at least two value bets from different games." : "None right now."}</div>`;
-  const sgp = S.parlayTab === "sgp";
-  return `<div class="tw"><table class="t"><thead><tr><th>Picks that must all win</th><th class="num">${sgp ? "Price" : "Odds"}</th><th class="num" title="The tool's chance that every leg wins">Chance to hit</th>
-    <th class="num" title="Break-even odds. Only bet if your sportsbook pays more than this.">Fair odds</th>
-    <th class="num" title="${sgp ? "How much more often these legs win together than if they were unrelated. ×1.20 = 20% more often." : "Average profit per $1 bet"}">${sgp ? "Win together" : "Expected return"}</th><th></th></tr></thead><tbody>${rows
-    .map((p, i) => `<tr><td><div class="legchips">${p.legs.map((x) => `<span>${esc(x)}</span>`).join("")}</div></td>
-      <td class="num">${sgp ? '<span class="muted">set by your book</span>' : fmtOdds(p.odds)}</td><td class="num">${pct(p.p_hit)}</td><td class="num">${fmtOdds(p.fair_odds)}</td>
-      <td class="num ${sgp ? "" : cls(p.ev)}">${sgp ? `×${num(p.lift, 2)}` : spct(p.ev)}</td>
-      <td class="num"><button class="btn small" data-act="add-parlay" data-i="${i}">Add to slip</button></td></tr>`)
-    .join("")}</tbody></table></div>`;
 }
 
 /* A price in a game's main grid: click to add it to the bet slip. */
@@ -362,6 +411,16 @@ function mkBtn(l, main, sub) {
   return `<button class="mk-btn ${on ? "on" : ""} ${isValue(l) ? "val" : ""}" data-act="toggle" data-key="${esc(l.key)}" aria-label="${on ? "Remove" : "Add"} ${esc(l.selection)}, ${fmtOdds(l.odds)}"
     title="${esc(l.selection)}: win chance ${pct(l.p_cond)} · book's chance ${pct(l.p_fair)} · expected return ${spct(l.ev)} (${RATINGS[ratingOf(l)][0]})">
     <span class="mk-main">${isValue(l) ? '<span class="ev-dot" aria-label="value bet"></span>' : ""}${main}</span><span class="mk-sub">${sub}</span></button>`;
+}
+
+/* How far a game's numbers have moved since the sportsbook first posted them. */
+function moveChips(g, s) {
+  const o = g.open_line || {}, n = g.line || {}, out = [];
+  const arrow = (d) => `<span class="ar">${d > 0 ? "▲" : "▼"} ${lineNum(Math.abs(d))}</span>`;
+  if (o.total != null && n.total != null && Math.abs(n.total - o.total) > 1e-9) out.push(`<span class="mv" title="The total opened at ${lineNum(o.total)} and is ${lineNum(n.total)} now">Total <b>${lineNum(o.total)} → ${lineNum(n.total)}</b> ${arrow(n.total - o.total)}</span>`);
+  if (o.spread_home != null && n.spread_home != null && Math.abs(n.spread_home - o.spread_home) > 1e-9) out.push(`<span class="mv" title="${esc(g.home)}'s spread opened at ${signed(o.spread_home)} and is ${signed(n.spread_home)} now">${esc(g.home)} <b>${signed(o.spread_home)} → ${signed(n.spread_home)}</b></span>`);
+  if (!out.length) return "";
+  return `<div class="chips"><span class="mini-lab" style="margin:0;align-self:center">Since it opened</span>${out.join("")}<button class="linkish" style="font-size:12px" data-act="moves-game" data-id="${s.sport}|${esc(g.game_id)}">see the chart</button></div>`;
 }
 
 /* One game, laid out like a sportsbook: the two teams with moneyline, over/under and spread, then the
@@ -392,13 +451,19 @@ function gameCard(g, s, showSport) {
       return `<span title="${esc(name)}">${esc(name)}</span><span class="track"><span class="zero"></span><span class="b" style="${style}"></span></span><span class="v">${signed(v)}</span>`;
     })
     .join("");
+  const pw = g.p_home ?? 0.5;
   return `<article class="game" id="g-${s.sport}-${esc(g.game_id)}">
-    <div class="g-hd">${showSport ? `<span class="badge">${s.sport.toUpperCase()}</span>` : ""}<span class="m">${esc(g.away)} @ ${esc(g.home)}</span>${g.edited ? '<span class="rate r-lean" title="You corrected this game\'s line. It is kept until the feed changes.">corrected by you</span>' : ""}<span class="time">${when(g.start)}</span></div>
+    <div class="g-hd">${teamBadge(s.sport, g.away)}<span class="m">${esc(g.away)} <span class="at">@</span> ${esc(g.home)}</span>${teamBadge(s.sport, g.home)}
+      ${g.edited ? '<span class="rate r-lean" title="You corrected this game\'s line. It is kept until the feed changes.">corrected by you</span>' : ""}
+      <span class="time">${showSport ? `${SPORT_ICON[s.sport] || ""} ` : ""}${when(g.start)}</span></div>
+    <div class="wp" aria-label="Win chance: ${esc(g.away)} ${pct(1 - pw, 0)}, ${esc(g.home)} ${pct(pw, 0)}"><span>${esc(g.away)} ${pct(1 - pw, 0)}</span>
+      <span class="bar"><span style="width:${(1 - pw) * 100}%;background:var(--s2)"></span><span style="width:${pw * 100}%;background:var(--s1)"></span></span><span>${pct(pw, 0)} ${esc(g.home)}</span></div>
     <div class="mkt" role="table" aria-label="Main bets for ${esc(g.away)} at ${esc(g.home)}">
       <span></span><span class="mk-h">Moneyline</span><span class="mk-h">Over / Under</span><span class="mk-h">Spread</span>
       <span class="mk-team">${esc(g.away)}</span>${mlBtn(ml.away)}${totBtn(tot.over, "O")}${spBtn(sp.away)}
       <span class="mk-team">${esc(g.home)}</span>${mlBtn(ml.home)}${totBtn(tot.under, "U")}${spBtn(sp.home)}
     </div>
+    ${moveChips(g, s)}
     ${ctx.length ? `<div class="chips">${ctx.map((c) => (c.startsWith("<span class=\"rate") ? c : `<span class="chip">${c}</span>`)).join("")}</div>` : ""}
     <details class="why" data-why="${esc(id)}" ${S.whyOpen[id] ? "open" : ""}><summary>The model's own numbers: ${favLine(g.home, g.away, g.model_margin)}, total ${num(g.model_total)}</summary>
       <div class="lines"><span class="h"></span><span class="h">Sportsbook${g.edited ? " (your numbers)" : ""}</span><span class="h">Model's own number</span>
@@ -507,7 +572,7 @@ function propTags(r) {
   const st = settings(), tags = [];
   if (r.value) tags.push(chip("value"));
   if (r.flag) tags.push(chip("news"));
-  else if (r.gap != null && Math.abs(r.gap) >= st.prop_lean) tags.push(`<span class="rate r-lean" title="The simulator disagrees with the ${r.priced ? "sportsbook" : "line"} by 15 points or more">Strong lean</span>`);
+  else if (r.gap != null && Math.abs(r.gap) >= st.prop_lean) tags.push(`<span class="rate r-lean" title="The simulator disagrees with the ${r.priced ? "sportsbook" : "line"} by 15 points or more">💪 Strong lean</span>`);
   if (r.mine) tags.push(`<span class="badge">${r.book === "corrected" ? "corrected by you" : "your book"}</span>`);
   return tags.join(" ");
 }
@@ -581,7 +646,7 @@ function propsByGame(s) {
     const L = g.line || {};
     const mainLine = [L.ml_home != null ? `${esc(g.home)} ${fmtOdds(L.ml_home)} / ${esc(g.away)} ${fmtOdds(L.ml_away)}` : "", L.total != null ? `O/U ${lineNum(L.total)}` : ""].filter(Boolean).join(" · ");
     return `<section class="card pgame" id="pg-${s.sport}-${esc(g.game_id)}"><details data-pg="${esc(id)}" ${open ? "open" : ""}>
-      <summary class="hd"><h2>${esc(g.away)} @ ${esc(g.home)}</h2><span class="sub">${when(g.start)} · ${n} lines${mainLine ? ` · ${mainLine}` : ""}</span><span class="right muted caret" aria-hidden="true"></span></summary>
+      <summary class="hd">${teamBadge(s.sport, g.away, true)}<h2>${esc(g.away)} @ ${esc(g.home)}</h2>${teamBadge(s.sport, g.home, true)}<span class="sub">${when(g.start)} · ${n} lines${mainLine ? ` · ${mainLine}` : ""}</span><span class="right muted caret" aria-hidden="true"></span></summary>
       <div class="bd">${open ? gameProps(s, g, { full: true }) : ""}</div></details></section>`;
   }).join("");
   const gtime = (g) => new Date(g.start).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" });
@@ -651,7 +716,7 @@ function propBoard(s) {
     const tags = [];
     if (r.value) tags.push(chip("value"));
     if (r.flag) tags.push(chip("news"));
-    else if (r.gap != null && Math.abs(r.gap) >= st.prop_lean) tags.push(`<span class="rate r-lean" title="The simulator disagrees with the ${r.priced ? "sportsbook" : "line"} by 15 points or more. See the test results above for how these have done.">Strong lean</span>`);
+    else if (r.gap != null && Math.abs(r.gap) >= st.prop_lean) tags.push(`<span class="rate r-lean" title="The simulator disagrees with the ${r.priced ? "sportsbook" : "line"} by 15 points or more. See the test results above for how these have done.">💪 Strong lean</span>`);
     if (r.mine) tags.push(r.book === "corrected" ? `<span class="badge" title="You entered the sportsbook's current line">corrected by you</span>` : `<span class="badge" title="A line you entered from another sportsbook">your book</span>`);
     return `<tr>
       <td><span class="pick">${esc(r.player)}</span> ${tags.join(" ")}<div class="sub2">${esc(r.game)} · ${when(r.start)}${r.refLine != null ? ` · DraftKings line ${lineNum(r.refLine)}` : ""}</div></td>
@@ -764,7 +829,7 @@ function pageProps() {
     <input type="search" placeholder="Search player" data-bind="pb.q" data-rerender="1" value="${esc(S.pb.q)}" aria-label="Search player">
     <button class="btn small ghost" data-act="pg-all" data-v="1">Open all</button><button class="btn small ghost" data-act="pg-all" data-v="0">Close all</button>` : "";
   return `
-  ${pageHead("Player props", `Every prop line for ${SP}, game by game, with the simulator's projection beside the sportsbook's number. ${nLines ? `${nLines.toLocaleString()} lines from ${esc(s.prop_book || "your entries")}.` : "No lines posted yet."}`)}
+  ${pageHead("🎯 Player props", `Every prop line for ${SP}, game by game, with the simulator's projection beside the sportsbook's number. ${nLines ? `${nLines.toLocaleString()} lines from ${esc(s.prop_book || "your entries")}.` : "No lines posted yet."}`)}
   <div class="filters">${seg}${jumpNav([["sec-board", byGame ? "Props by game" : "Ranked list", nLines], ["sec-trust", "How much to trust them"], ["sec-price", "Price your book's line"], ["sec-proj", "Projections"]])}</div>
   <div class="filters">${views}${grouping}</div>
   ${!nLines ? `<section class="card" id="sec-board"><div class="hd"><h2>Player props</h2></div><div class="empty"><b>No ${SP} prop lines are posted yet.</b> Sportsbooks usually post them the day before a game. You can still price a line yourself below, and the projections table has every player.</div></section>`
@@ -926,8 +991,29 @@ function liveBet(b) {
     </div></section>`;
 }
 
+/* One game on the scoreboard: both teams with their score, the clock, and the live win chance while it is on. */
+function scoreCard(g) {
+  const live = g.state === "in", done = g.state === "post";
+  const hs = g.home_score, as = g.away_score, lead = hs === as ? "" : hs > as ? "home" : "away";
+  const state = live ? `<span class="sc-live"><span class="dot"></span>Live</span> ${esc(g.detail)}` : done ? esc(g.detail || "Final") : when(g.start);
+  const row = (side, abbr, pts) => `<div class="sc-row ${done && lead && lead !== side ? "lost" : ""}">${teamBadge(g.sport, abbr, true)}<span class="sc-team">${esc(abbr)}</span>
+    <b class="sc-pts">${g.state === "pre" ? "" : Math.round(pts)}</b></div>`;
+  const wp = live && g.home_wp != null ? `<div class="wp" title="ESPN's own live estimate, not this tool's"><span>${esc(g.away)} ${pct(1 - g.home_wp, 0)}</span>
+      <span class="bar"><span style="width:${(1 - g.home_wp) * 100}%;background:var(--s2)"></span><span style="width:${g.home_wp * 100}%;background:var(--s1)"></span></span><span>${pct(g.home_wp, 0)} ${esc(g.home)}</span></div>
+      <div class="sc-note">win chance right now (ESPN's estimate)</div>` : "";
+  return `<article class="sc ${live ? "live" : ""}"><div class="sc-top"><span>${SPORT_ICON[g.sport] || ""} ${state}</span></div>
+    ${row("away", g.away, as)}${row("home", g.home, hs)}${wp}</article>`;
+}
+function scoreboard() {
+  const games = (S.live.scores || []).filter((g) => S.sport === "all" || g.sport === S.sport);
+  if (!games.length) return "";
+  const n = games.filter((g) => g.state === "in").length;
+  return `<section class="card"><div class="hd"><h2>Today's scoreboard</h2><span class="sub">${n ? `${n} game${n === 1 ? "" : "s"} in play` : "nothing in play right now"} · ${games.length} today</span></div>
+    <div class="bd"><div class="scores">${games.map(scoreCard).join("")}</div></div></section>`;
+}
+
 function pageLive() {
-  const head = pageHead("Live", "Your recorded bets as they stand right now, pick by pick, with real scores and stat lines. It checks for new numbers every 30 seconds while a game is on.");
+  const head = pageHead("🔴 Live", "Your recorded bets as they stand right now, pick by pick, with real scores and stat lines, plus today's scoreboard. It checks for new numbers every 30 seconds while a game is on.");
   if (!S.live && !S.liveErr) return `${head}<div class="empty"><span class="spinner"></span>Checking the games ...</div>`;
   if (!S.live) return `${head}<div class="banner warn">Could not load live data: ${esc(S.liveErr)}</div>`;
   const bets = S.live.bets;
@@ -935,7 +1021,7 @@ function pageLive() {
     <span class="spacer"></span><button class="btn" data-act="live-refresh">Check now</button></div>`;
   if (!bets.length) {
     return `${head}${bar}<section class="card"><div class="empty"><b>No open bets to follow.</b> After you place a bet at your sportsbook, add the same picks to the bet slip here, enter the odds and your stake, and click <i>Record bet</i>.
-      It then shows up on this page with live scores, and you can check any cash-out offer against it.</div></section>`;
+      It then shows up on this page with live scores, and you can check any cash-out offer against it.</div></section>${scoreboard()}`;
   }
   const open = bets.filter((b) => b.open), done = bets.filter((b) => !b.open);
   const atStake = open.reduce((n, b) => n + b.stake, 0), worth = open.reduce((n, b) => n + b.value, 0);
@@ -944,7 +1030,8 @@ function pageLive() {
       <div class="tile"><div class="label">Worth right now</div><div class="value">${money(worth, 2)}</div><div class="delta">all open bets, at the tool's live estimates</div></div></div>` : ""}
     <div class="banner"><span aria-hidden="true">ⓘ</span><span>Scores and stats are real. The <b>chance now</b> figures are rough estimates from the score, the clock and each player's pace: they do not know about foul trouble, injuries during the game or who has the ball. Use them as a guide, and check the final result on your sportsbook.</span></div>
     ${open.map(liveBet).join("")}
-    ${done.length ? `<h2 class="sec-title">Finished in the last day</h2>${done.map(liveBet).join("")}` : ""}`;
+    ${done.length ? `<h2 class="sec-title">Finished in the last day</h2>${done.map(liveBet).join("")}` : ""}
+    ${scoreboard()}`;
 }
 
 async function checkOffer(betId, quiet = false) {
@@ -959,9 +1046,156 @@ async function checkOffer(betId, quiet = false) {
   if (box && b) { const t = document.createElement("div"); t.innerHTML = cashBox(b); box.innerHTML = $(`#cash-${CSS.escape(betId)}`, t).innerHTML; }
 }
 
+// ============================================================================ line moves page
+let oddsTimer = null;
+function oddsLoop() {
+  clearTimeout(oddsTimer);
+  if (S.page !== "moves") return;
+  if (!S.odds || Date.now() - S.oddsAt > 60000) loadOdds();
+  else oddsTimer = setTimeout(loadOdds, 60000);
+}
+async function loadOdds() {
+  clearTimeout(oddsTimer);
+  try { S.odds = await api("/api/odds"); S.oddsErr = null; } catch (e) { S.oddsErr = String(e.message || e); }
+  S.oddsAt = Date.now();
+  if (S.page === "moves") { $("#main").innerHTML = pageMoves(); afterRender(); oddsTimer = setTimeout(loadOdds, 60000); }
+}
+const moveSize = (g) => Math.abs(g.move.total || 0) + Math.abs(g.move.spread_home || 0) + Math.abs(g.move.p_home || 0) * 25;
+
+function moveCard(g, on) {
+  const m = g.move, o = g.open || {}, n = g.now || {};
+  const row = (label, a, b, d, fmt, unit) => `<div class="mc-row"><span class="k">${label}</span><span>${a == null ? "–" : fmt(a)} → <b>${b == null ? "–" : fmt(b)}</b></span>
+    ${d == null || Math.abs(d) < 1e-9 ? '<span class="same">no change</span>' : `<span class="d">${unit(d)}</span>`}</div>`;
+  const arrow = (fmt) => (d) => `${d > 0 ? "▲" : "▼"} ${fmt(Math.abs(d))}`;
+  // a home spread that goes up means the home team is getting more points: the line moved toward the away team
+  const toward = (d) => `toward ${esc(d > 0 ? g.away : g.home)}`;
+  return `<button class="mcard ${on ? "on" : ""}" data-act="moves-game" data-id="${g.sport}|${esc(g.game_id)}" aria-pressed="${on}">
+    <div class="mc-hd">${teamBadge(g.sport, g.away, true)}<span>${esc(g.away)} @ ${esc(g.home)}</span>${teamBadge(g.sport, g.home, true)}<span class="time">${when(g.start)}</span></div>
+    <div class="mc-rows">
+      ${row("Total", o.total, n.total, m.total, lineNum, arrow(lineNum))}
+      ${row(`${esc(g.home)} spread`, o.spread_home, n.spread_home, m.spread_home, (x) => signed(x), toward)}
+      ${row(`${esc(g.home)} to win`, m.p_home_open, m.p_home_now, m.p_home, (x) => pct(x, 0), arrow((x) => `${(x * 100).toFixed(0)} pts`))}
+    </div></button>`;
+}
+
+function pageMoves() {
+  const head = pageHead("📈 Line moves", "How each game's numbers have moved since the sportsbook first posted them. A line that moves toward a pick after you take it is the earliest sign the pick was a good one. Opening numbers can be posted long before a game, so big moves since then are common.");
+  if (!S.odds && !S.oddsErr) return `${head}<div class="empty"><span class="spinner"></span>Reading the lines ...</div>`;
+  if (!S.odds) return `${head}<div class="banner warn">Could not load line moves: ${esc(S.oddsErr)}</div>`;
+  const O = S.odds;
+  const games = O.games.filter((g) => S.sport === "all" || g.sport === S.sport).sort((a, b) => moveSize(b) - moveSize(a));
+  if (!games.length) return `${head}<div class="filters">${sportSeg()}</div><section class="card"><div class="empty">No upcoming games to follow.</div></section>`;
+  const moved = games.filter((g) => moveSize(g) > 1e-9);
+  const bigT = [...games].sort((a, b) => Math.abs(b.move.total || 0) - Math.abs(a.move.total || 0))[0];
+  const id = (g) => `${g.sport}|${g.game_id}`;
+  if (!S.movesGame || !games.some((g) => id(g) === S.movesGame)) S.movesGame = id(games[0]);
+  const sel = games.find((g) => id(g) === S.movesGame);
+  const props = O.props.filter((p) => S.sport === "all" || p.sport === S.sport).slice(0, 60);
+  const nPropMoves = S.sport === "all" ? O.prop_moves : (O.prop_moves_by_sport || {})[S.sport] || 0;
+  const checked = O.checked_at ? new Date(O.checked_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "not yet";
+  const stale = O.stale_games ? `<div class="banner warn"><span>The sportsbook's feed has moved on ${O.stale_games} game${O.stale_games === 1 ? "" : "s"} since the picks were last worked out. They update by themselves within ${O.auto_update_minutes} minutes, or do it now.</span><button class="btn small" data-act="refresh">Update now</button></div>` : "";
+  const m = sel.move, o = sel.open || {}, n = sel.now || {};
+  const box = (key, title, now, sub) => `<div class="cbox"><h3>${title}</h3><div class="cnow">${now}</div><div class="csub">${sub}</div><div class="chart" data-step="${key}"></div></div>`;
+  const moveTxt = (opened, d, unit) => (d == null ? "no opening number in the feed" : Math.abs(d) < 1e-9 ? `opened ${opened}, unchanged` : `opened ${opened} · ${d > 0 ? "up" : "down"} ${unit(Math.abs(d))} since`);
+  const spreadTxt = m.spread_home == null ? "no opening number in the feed" : Math.abs(m.spread_home) < 1e-9 ? `opened ${signed(o.spread_home)}, unchanged`
+    : `opened ${signed(o.spread_home)} · moved ${lineNum(Math.abs(m.spread_home))} toward ${esc(m.spread_home > 0 ? sel.away : sel.home)}`;
+  const first = sel.series.length ? new Date(sel.series[0].t) : null;
+  const watching = first ? `This tool has watched this game since ${first.toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" })} and has logged ${sel.series.length} set${sel.series.length === 1 ? "" : "s"} of numbers.${sel.series.length < 2 ? " The line steps each time the sportsbook changes a number, so it fills in from here." : ""}` : "";
+  return `${head}
+  <div class="filters">${sportSeg()}<span class="spacer"></span><span class="muted" style="font-size:12.5px">Feed checked ${checked} · every ${O.check_minutes} min</span><button class="btn small" data-act="odds-refresh">Check now</button></div>
+  ${stale}
+  <div class="tiles">
+    <div class="tile"><div class="label">Games followed</div><div class="value">${games.length}</div><div class="delta">${O.log_rows.toLocaleString()} changes logged${O.log_since ? ` since ${new Date(O.log_since).toLocaleDateString([], { month: "short", day: "numeric" })}` : ""}</div></div>
+    <div class="tile"><div class="label">Moved since opening</div><div class="value">${moved.length}<span class="muted" style="font-size:15px"> of ${games.length}</span></div><div class="delta">spread, total or moneyline</div></div>
+    <div class="tile"><div class="label">Biggest total move</div><div class="value">${bigT && bigT.move.total ? `${bigT.move.total > 0 ? "▲" : "▼"} ${lineNum(Math.abs(bigT.move.total))}` : "–"}</div><div class="delta">${bigT && bigT.move.total ? `${esc(bigT.away)} @ ${esc(bigT.home)}: ${lineNum(bigT.open.total)} → ${lineNum(bigT.now.total)}` : "nothing has moved"}</div></div>
+    <div class="tile"><div class="label">Prop lines moved</div><div class="value">${nPropMoves.toLocaleString()}</div><div class="delta">since they opened</div></div>
+  </div>
+  <section class="card" id="sec-chart"><div class="hd">${teamBadge(sel.sport, sel.away, true)}<h2>${esc(sel.away)} @ ${esc(sel.home)}</h2>${teamBadge(sel.sport, sel.home, true)}<span class="sub">${when(sel.start)} · pick another game below</span></div>
+    <div class="bd"><div class="cgrid">
+      ${box("total", "Total points (over / under)", lineNum(n.total), moveTxt(lineNum(o.total), m.total, lineNum))}
+      ${box("spread_home", `${esc(sel.home)} spread`, n.spread_home == null ? "–" : signed(n.spread_home), spreadTxt)}
+      ${box("p_home", `${esc(sel.home)} chance to win`, pct(m.p_home_now, 0), moveTxt(pct(m.p_home_open, 0), m.p_home, (x) => `${(x * 100).toFixed(0)} points`))}
+    </div>
+    <p class="note" style="margin:10px 0 0">Solid line: each number the sportsbook has shown while this tool was watching. Dashed line: the opening number. ${watching}
+      ${sel.model_total != null ? `The model's own numbers for this game: total ${num(sel.model_total)}, ${favLine(sel.home, sel.away, sel.model_margin)}.` : ""}</p></div></section>
+  <section class="card"><div class="hd"><h2>Every game, biggest movers first</h2><span class="sub">opening number → now · tap a game to chart it</span></div>
+    <div class="bd"><div class="mcards">${games.map((g) => moveCard(g, id(g) === S.movesGame)).join("")}</div></div></section>
+  <section class="card"><div class="hd"><h2>Player prop lines that moved</h2><span class="sub">${props.length ? (props.length < nPropMoves ? `the ${props.length} biggest of ${nPropMoves.toLocaleString()}` : `${props.length} line${props.length === 1 ? "" : "s"}`) : "none yet"}</span></div>
+    <div class="bd">${props.length ? `<div class="pm-list">${props.map((p) => `<div class="pm"><div class="pick">${esc(p.player)}</div>
+        <div class="mvn">${p.move > 0 ? "▲" : "▼"} ${lineNum(Math.abs(p.move))}<small>${lineNum(p.open_line)} → ${lineNum(p.line)}</small></div>
+        <div class="sub2">${esc(p.market)} · ${esc(p.game)}</div></div>`).join("")}</div>` : '<div class="empty" style="padding-left:0">No prop line has moved since it opened.</div>'}</div></section>`;
+}
+
+/* A line's history as a stepped line (a line holds until it changes), with the opening number dashed. */
+function stepChart(el, pts, opened, fmt, name, { minPad = 0.5, clamp = null } = {}) {
+  const W = el.clientWidth || 320, H = 170, m = { l: 44, r: 14, t: 12, b: 24 };
+  pts = pts.filter((p) => p.v != null);
+  if (!pts.length) { el.innerHTML = '<div class="empty" style="padding:12px 0">No changes logged yet for this number.</div>'; return; }
+  const now = Date.now(), t0 = Math.min(pts[0].t, now - 60000), t1 = Math.max(now, pts[pts.length - 1].t);
+  const vals = pts.map((p) => p.v).concat(opened != null ? [opened] : []);
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  const pad = Math.max((hi - lo) * 0.25, minPad);
+  let a = lo - pad, b = hi + pad;
+  if (clamp) { a = Math.max(a, clamp[0]); b = Math.min(b, clamp[1]); }
+  const ticks = niceTicks(a, b, 4), step = ticks.length > 1 ? ticks[1] - ticks[0] : 1;
+  while (ticks[0] > lo + 1e-9) ticks.unshift(+(ticks[0] - step).toFixed(10));
+  while (ticks[ticks.length - 1] < hi - 1e-9) ticks.push(+(ticks[ticks.length - 1] + step).toFixed(10));
+  lo = ticks[0]; hi = ticks[ticks.length - 1];
+  const X = (t) => m.l + ((t - t0) / (t1 - t0)) * (W - m.l - m.r);
+  const Y = (v) => m.t + (1 - (v - lo) / (hi - lo)) * (H - m.t - m.b);
+  let d = `M${X(pts[0].t)},${Y(pts[0].v)}`;
+  for (let i = 1; i < pts.length; i++) d += ` H${X(pts[i].t)} V${Y(pts[i].v)}`;
+  d += ` H${X(t1)}`;
+  const tl = (t) => new Date(t).toLocaleString([], t1 - t0 > 86400000 ? { weekday: "short", hour: "numeric" } : { hour: "numeric", minute: "2-digit" });
+  let svg = `<svg viewBox="0 0 ${W} ${H}" height="${H}" role="img" aria-label="${esc(name)} over time">`;
+  svg += `<g class="grid">${ticks.map((v) => `<line x1="${m.l}" x2="${W - m.r}" y1="${Y(v)}" y2="${Y(v)}"></line>`).join("")}</g>`;
+  svg += ticks.map((v) => `<text class="tick" x="${m.l - 7}" y="${Y(v) + 4}" text-anchor="end">${fmt(v)}</text>`).join("");
+  svg += `<text class="tick" x="${m.l}" y="${H - 6}">${tl(t0)}</text><text class="tick" x="${W - m.r}" y="${H - 6}" text-anchor="end">now</text>`;
+  if (opened != null) svg += `<line x1="${m.l}" x2="${W - m.r}" y1="${Y(opened)}" y2="${Y(opened)}" stroke="var(--ink-2)" stroke-width="1" stroke-dasharray="4 4"></line>
+    <text class="tick" x="${W - m.r}" y="${Y(opened) - 5}" text-anchor="end">opened ${fmt(opened)}</text>`;
+  svg += `<path d="${d}" fill="none" stroke="var(--s1)" stroke-width="2" stroke-linejoin="round"></path>`;
+  svg += pts.map((p) => `<circle cx="${X(p.t)}" cy="${Y(p.v)}" r="4" fill="var(--s1)" stroke="var(--surface)" stroke-width="2"></circle>`).join("");
+  svg += `<line class="xh" x1="0" x2="0" y1="${m.t}" y2="${H - m.b}" stroke="var(--axis)" stroke-width="1" style="display:none"></line>`;
+  svg += `<rect class="hit" x="${m.l}" y="${m.t}" width="${W - m.l - m.r}" height="${H - m.t - m.b}" fill="transparent"></rect></svg>`;
+  el.innerHTML = svg;
+  const tip = tooltip(el), xh = $(".xh", el);
+  $(".hit", el).addEventListener("pointermove", (ev) => {
+    const r = el.getBoundingClientRect(), t = t0 + (((ev.clientX - r.left) / r.width) * W - m.l) / (W - m.l - m.r) * (t1 - t0);
+    let cur = pts[0];
+    for (const p of pts) if (p.t <= t) cur = p;
+    const px = Math.max(X(cur.t), Math.min(((ev.clientX - r.left) / r.width) * W, W - m.r));
+    xh.setAttribute("x1", px); xh.setAttribute("x2", px); xh.style.display = "";
+    tip.innerHTML = `<div class="t">${new Date(Math.max(t, pts[0].t)).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" })}</div>
+      <div class="r"><span class="k" style="background:var(--s1)"></span><b>${fmt(cur.v)}</b><span class="muted">${esc(name)}</span></div>
+      ${opened != null ? `<div class="r"><b>${fmt(opened)}</b><span class="muted">at the open</span></div>` : ""}`;
+    placeTip(el, tip, (px / W) * r.width, (Y(cur.v) / H) * r.height);
+  });
+  $(".hit", el).addEventListener("pointerleave", () => { tip.style.display = "none"; xh.style.display = "none"; });
+}
+
+function drawMoves() {
+  const sel = S.odds && S.odds.games.find((g) => `${g.sport}|${g.game_id}` === S.movesGame);
+  if (!sel) return;
+  const o = sel.open || {}, n = sel.now || {};
+  // what the tool is using now is the last point, in case the log has not caught the latest change yet
+  const cur = { total: n.total, spread_home: n.spread_home, p_home: sel.move.p_home_now };
+  const opened = { total: o.total, spread_home: o.spread_home, p_home: sel.move.p_home_open };
+  const fmts = { total: lineNum, spread_home: (v) => signed(v, Math.abs(v) % 1 ? 1 : 0), p_home: (v) => `${Math.round(v * 100)}%` };
+  const names = { total: "total", spread_home: `${sel.home} spread`, p_home: `${sel.home} to win` };
+  for (const el of $$("[data-step]")) {
+    const k = el.dataset.step;
+    let pts = sel.series.map((p) => ({ t: Date.parse(p.t), v: p[k] })).filter((p) => p.v != null);
+    const dedup = [];
+    for (const p of pts) if (!dedup.length || Math.abs(dedup[dedup.length - 1].v - p.v) > 1e-9) dedup.push(p);
+    pts = dedup;
+    if (cur[k] != null && (!pts.length || Math.abs(pts[pts.length - 1].v - cur[k]) > 1e-9)) pts.push({ t: Date.now() - 1000, v: cur[k] });
+    stepChart(el, pts, opened[k], fmts[k], names[k], k === "p_home" ? { minPad: 0.04, clamp: [0, 1] } : {});
+  }
+}
+
 // ============================================================================ results page
 function pageTrack() {
-  const title = pageHead("Results", "How the tool's picks and your own recorded bets have actually done. Every priced pick is logged automatically and settled after the game.");
+  const title = pageHead("🏆 Results", "How the tool's picks and your own recorded bets have actually done. Every priced pick is logged automatically and settled after the game.");
   if (!S.track) { loadTrack(); return `${title}<div class="filters">${sportSeg()}</div><div class="empty"><span class="spinner"></span>Loading results ...</div>`; }
   const T = S.track;
   if (T.error) return `${title}<div class="banner warn">${esc(T.error)}</div>`;
@@ -1069,7 +1303,7 @@ function pageModel() {
     }
     return game + prop;
   });
-  return `${pageHead("How it works", "What the tool does with the data, and how well it has done against real sportsbook lines.")}${steps}${cards.join("")}
+  return `${pageHead("💡 How it works", "What the tool does with the data, and how well it has done against real sportsbook lines.")}${steps}${cards.join("")}
     <p class="muted" style="font-size:12.5px">For the full betting replay of the game model, run <code>.\\sportsedge backtest</code> in a terminal.</p>`;
 }
 
@@ -1110,6 +1344,9 @@ function renderGuide() {
     <h3>During the games</h3>
     <p>The <b>Live</b> page follows every bet you recorded, pick by pick, with real scores and stat lines. If your sportsbook offers a cash-out, type the amount in and the tool compares it with what the bet is worth right now:
       what it would pay, times the chance the remaining picks win. Sportsbooks usually offer less than that. Cashing out can still make sense when the possible win is large next to your bankroll, and the page tells you the amount at which it does.</p>
+    <h3>Line moves</h3>
+    <p>The <b>Line moves</b> page shows how each game's spread, total and moneyline have moved since the sportsbook first posted them, with a chart per game.
+      The tool checks the feed every few minutes, logs every change, and reworks the picks by itself when a line has moved.</p>
     <h3>If a line looks wrong</h3>
     <p>The tool reads sportsbook lines through ESPN's feed, which can be minutes or hours behind. If your sportsbook shows a different spread or total, open <b>Different at your sportsbook? Correct the line</b> on that game's card and type in the current numbers.
       For a player prop, use <b>Price a line from your sportsbook</b> on the Player props page. A pick is only as good as the line it was priced at.</p>
@@ -1307,7 +1544,9 @@ function divBars(el, rows) {
     let d;
     if (r.v >= 0) d = `M${zero},${y} H${zero + w - rr} Q${zero + w},${y} ${zero + w},${y + rr} V${y + h - rr} Q${zero + w},${y + h} ${zero + w - rr},${y + h} H${zero} Z`;
     else d = `M${zero},${y} H${zero - w + rr} Q${zero - w},${y} ${zero - w},${y + rr} V${y + h - rr} Q${zero - w},${y + h} ${zero - w + rr},${y + h} H${zero} Z`;
-    svg += `<text class="lab" x="${labelW}" y="${y + 10}" text-anchor="end">${esc(r.label)}</text>`;
+    const room = Math.max(8, Math.floor(labelW / 6.4));  // letters that fit in the label column
+    const short = r.label.length > room ? `${r.label.slice(0, room - 1).trimEnd()}…` : r.label;
+    svg += `<text class="lab" x="${labelW}" y="${y + 10}" text-anchor="end">${esc(short)}<title>${esc(r.label)}</title></text>`;
     svg += `<path d="${d}" fill="${fill}"><title>${esc(r.label)}: ${signed(r.v, 2)} points</title></path>`;
     const tx = r.v >= 0 ? zero + w + 5 : zero - w - 5;
     svg += `<text class="tick" x="${tx}" y="${y + 10}" text-anchor="${r.v >= 0 ? "start" : "end"}">${signed(r.v, 2)}</text>`;
@@ -1359,6 +1598,7 @@ function labelTables(root = document) {
 
 function afterRender() {
   labelTables();
+  if (S.page === "moves") drawMoves();
   if (S.focusGame) { const el = document.getElementById(S.focusGame); S.focusGame = null; if (el) setTimeout(() => el.scrollIntoView({ block: "start", behavior: "smooth" }), 30); }
   if (S.focusForm && S.page === "props") { S.focusForm = false; const t = $("#pf-over"); if (t) setTimeout(() => { t.scrollIntoView({ block: "center", behavior: "smooth" }); t.focus({ preventScroll: true }); }, 30); }
   if (S.page === "track" && S.track && !S.track.error) {
@@ -1379,6 +1619,7 @@ function renderSlip() {
   const el = $("#slip");
   const legs = S.slip.map((k) => S.legs[k]).filter(Boolean);
   $("#slipToggle").textContent = `Bet slip${legs.length ? ` (${legs.length})` : ""}`;
+  $("#slipToggle").classList.toggle("empty", !legs.length && !$("#slip").classList.contains("open"));
   let html = `<div class="hd"><h2>Bet slip</h2>${legs.length ? `<span class="count">${legs.length}</span><button class="btn small ghost" data-act="clear-slip">Clear</button>` : ""}</div>`;
   if (!legs.length) {
     el.innerHTML = html + `<div class="empty"><b>Build a bet here.</b><br>Click <b>+</b> next to any pick, or any bet on a game card or the prop board.
@@ -1443,7 +1684,9 @@ async function toggleLeg(key) {
   S.slipStake = S.slipStake ?? null;
   await evalSlip();
   renderSlip();
-  if (window.innerWidth <= 1100 && S.slip.length) $("#slip").classList.add("open");
+  // tablets open the slip when a pick is added; on a phone it would cover the page, so the button shows the count instead
+  const w = document.documentElement.clientWidth;
+  if (w <= 1100 && w > 640 && S.slip.length) { $("#slip").classList.add("open"); $("#slipToggle").classList.remove("empty"); }
 }
 
 // ============================================================================ events
@@ -1454,6 +1697,14 @@ document.addEventListener("click", async (e) => {
   if (act === "nav") { if (location.hash.slice(1) === a.dataset.page) { renderMain(); window.scrollTo(0, 0); } else location.hash = a.dataset.page; return; }
   if (act === "nav-sport") { S.pb = { tab: "", game: "", stat: "", q: "", limit: 40 }; location.hash = `props/${a.dataset.sport}`; return; }
   if (act === "live-refresh") { a.disabled = true; await loadLive(); return; }
+  if (act === "odds-refresh") { a.disabled = true; await loadOdds(); return; }
+  if (act === "moves-game") {
+    S.movesGame = a.dataset.id;
+    if (S.page !== "moves") { location.hash = "moves"; return; }
+    $("#main").innerHTML = pageMoves(); afterRender();
+    const c = document.getElementById("sec-chart"); if (c) c.scrollIntoView({ block: "start", behavior: "smooth" });
+    return;
+  }
   if (act === "guide") { e.preventDefault(); renderGuide(); const d = $("#guide"); if (!d.open) d.showModal(); return; }
   if (act === "guide-close") { $("#guide").close(); return; }
   if (act === "intro-ok") { S.introSeen = true; localStorage.setItem("intro_seen", "1"); renderMain(); return; }
@@ -1503,7 +1754,11 @@ document.addEventListener("click", async (e) => {
     poll();
     return;
   }
-  if (act === "slip-toggle") { $("#slip").classList.toggle("open"); return; }
+  if (act === "slip-toggle") {
+    const open = $("#slip").classList.toggle("open");
+    a.classList.toggle("empty", !S.slip.length && !open);  // on phones the button hides while the slip is empty and closed
+    return;
+  }
   if (act === "days") { S.trackDays = +a.dataset.days || 0; S.track = null; renderMain(); return; }
   if (act === "grade") {
     a.disabled = true; a.textContent = "Settling ...";

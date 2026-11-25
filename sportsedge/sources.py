@@ -62,9 +62,15 @@ def _line(s):
 # ----------------------------------------------------------------------------- ESPN slate + odds
 def _parse_odds(o: dict) -> dict:
     out = {k: np.nan for k in ["ml_home", "ml_away", "spread_home", "spread_home_odds", "spread_away_odds",
-                                "total", "over_odds", "under_odds"]}
+                                "total", "over_odds", "under_odds",
+                                "open_ml_home", "open_ml_away", "open_spread_home", "open_total"]}
     if not o:
         return out
+    opened = lambda d, k: (d.get("open") or {}).get(k)  # noqa: E731  the number the sportsbook first posted
+    out["open_ml_home"] = _american(opened((o.get("moneyline") or {}).get("home", {}), "odds"))
+    out["open_ml_away"] = _american(opened((o.get("moneyline") or {}).get("away", {}), "odds"))
+    out["open_spread_home"] = _line(opened((o.get("pointSpread") or {}).get("home", {}), "line"))
+    out["open_total"] = _line(opened((o.get("total") or {}).get("over", {}), "line"))
     out["book"] = (o.get("provider") or {}).get("name")
     ml = o.get("moneyline") or {}
     ps = o.get("pointSpread") or {}
@@ -333,7 +339,8 @@ ESPN_PROP_TYPES = {
             "Total Points and Assists": "pa", "Total Assists and Rebounds": "ra"},
 }
 ESPN_YES_ONLY = {"nfl": {"Anytime Touchdown Scorer": "anytime_td"}, "nba": {}}  # one price, no "No" side
-PROP_COLS = ["home", "away", "player", "key", "market", "line", "over_odds", "under_odds", "book"]
+PROP_COLS = ["home", "away", "player", "key", "market", "line", "over_odds", "under_odds", "book",
+             "open_line", "open_over_odds", "open_under_odds"]
 
 
 def _athlete_id(item: dict) -> str | None:
@@ -383,9 +390,12 @@ def parse_espn_props(sport: str, items: list[dict], names: dict) -> list[dict]:
         if aid is None or (t not in ou and t not in yes):
             continue
         # the NFL feed carries the line but no price; those lines are kept and shown as "line only"
-        price = _american(((it.get("odds") or {}).get("american") or {}).get("value"))
+        am = (it.get("odds") or {}).get("american") or {}
+        price = _american(am.get("value"))
         line = ((it.get("current") or {}).get("target") or {}).get("value")
-        groups.setdefault((t, aid), []).append((None if line is None else float(line), price))
+        oline = ((it.get("open") or {}).get("target") or {}).get("value")
+        groups.setdefault((t, aid), []).append((None if line is None else float(line), price,
+                                                 None if oline is None else float(oline), _american(am.get("open"))))
     rows = []
     for (t, aid), v in groups.items():
         name = names.get(aid)
@@ -400,7 +410,8 @@ def parse_espn_props(sport: str, items: list[dict], names: dict) -> list[dict]:
         if len(v) != 2 or v[0][0] is None or v[0][0] != v[1][0] or np.isnan(v[0][1]) != np.isnan(v[1][1]):
             continue
         rows.append({"player": name, "key": norm_name(name), "market": ou[t], "line": v[0][0],
-                     "over_odds": v[0][1], "under_odds": v[1][1]})
+                     "over_odds": v[0][1], "under_odds": v[1][1],
+                     "open_line": np.nan if v[0][2] is None else v[0][2], "open_over_odds": v[0][3], "open_under_odds": v[1][3]})
     return rows
 
 

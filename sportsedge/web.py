@@ -24,7 +24,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import access, config, engine, live, markets, parlay, tracker
+from . import access, config, engine, live, markets, oddslog, parlay, sources, tracker
 from .util import norm_name
 
 UI_DIR = Path(__file__).resolve().parent / "ui"
@@ -122,7 +122,9 @@ LOCK = threading.Lock()
 STATE: dict = {"status": "idle", "log": [], "error": None, "run_at": None, "started_at": None,
                "results": [], "legs": {}, "parlays": {}, "params": {},
                # lines the user corrected by hand: (sport, game_id) -> {"change": {...}, "feed": {...}}
-               "overrides": {}}
+               "overrides": {},
+               # the automatic odds check: when it last ran, and what the feed showed then
+               "checked_at": None, "feed": {}, "changes": 0}
 
 
 # ============================================================================= helpers
@@ -185,6 +187,10 @@ def _run(sports: list[str], days: dict, props: bool, track: bool):
         with LOCK:
             STATE.update(results=results, legs={l["key"]: l for l in legs}, parlays=parlays, status="ready",
                          run_at=dt.datetime.now().isoformat(timespec="seconds"), error=None)
+        try:
+            check_odds()
+        except Exception as e:
+            _log(f"Odds check skipped: {e!r}")
         _log("Done")
     except Exception as e:
         _log(f"Failed: {e!r}")
@@ -219,6 +225,55 @@ def _load_overrides():
 def _feed_line(res: dict, game_id) -> dict:
     o = res["_feed_odds"][game_id]
     return {k: (None if o.get(k) is None or pd.isna(o.get(k)) else float(o.get(k))) for k in ("spread_home", "total")}
+
+
+# ============================================================================= automatic odds check
+def check_odds() -> int:
+    """Look at the feed's game lines, log any change, and return how many games changed. Cheap: one request
+    per day of schedule, no model run."""
+    today = dt.date.today()
+    changed, feed = 0, {}
+    for sport, days in (("nfl", 7), ("nba", 1)):
+        try:
+            up = sources.espn_scoreboard(sport, today, today + dt.timedelta(days=days - 1))
+        except Exception:
+            continue
+        if up.empty:
+            continue
+        changed += oddslog.record(sport, up)
+        for g in up[up["state"] == "pre"].itertuples():
+            feed[(sport, g.home, g.away)] = {k: (None if pd.isna(getattr(g, k)) else float(getattr(g, k))) for k in oddslog.FIELDS}
+    STATE.update(checked_at=dt.datetime.now().isoformat(timespec="seconds"), feed=feed, changes=STATE["changes"] + changed)
+    return changed
+
+
+def _stale_games() -> int:
+    """Games whose spread or total in the feed now differs from the one the current picks were priced at."""
+    n = 0
+    for r in STATE["results"]:
+        for gid, o in (r.get("_feed_odds") or {}).items():
+            row = r["_feed_rows"][gid]
+            f = STATE["feed"].get((r["sport"], row["home"], row["away"]))
+            if f and any(f.get(k) is not None and o.get(k) is not None and not pd.isna(o.get(k)) and abs(f[k] - float(o[k])) > 1e-9
+                         for k in ("spread_home", "total")):
+                n += 1
+    return n
+
+
+def _odds_loop():
+    while True:
+        time.sleep(max(config.ODDS_CHECK_MINUTES, 1) * 60)
+        try:
+            if STATE["status"] == "running":
+                continue
+            check_odds()
+            last = dt.datetime.fromisoformat(STATE["run_at"]) if STATE["run_at"] else None
+            old_enough = last is None or (dt.datetime.now() - last).total_seconds() >= config.AUTO_UPDATE_MINUTES * 60
+            if _stale_games() and old_enough:
+                _log("A line moved in the feed: updating automatically")
+                start_run()
+        except Exception as e:  # the check must never take the dashboard down
+            _log(f"Odds check failed: {e!r}")
 
 
 def start_run(sports=("nfl", "nba"), days=None, props=True, track=True) -> bool:
@@ -438,8 +493,13 @@ def api_live():
     """Every open bet as it stands right now."""
     sd, legs = _live_context()
     bets = live.open_bets(tracker.load_bets(), sd, legs)
-    return clean({"bets": bets, "updated": dt.datetime.now().isoformat(timespec="seconds"),
-                  "in_play": any(b.get("in_play") for b in bets), "kelly_fraction": config.KELLY_FRACTION})
+    try:
+        scores = live.scores()
+    except Exception:  # the scoreboard is an extra: never let it take the bets down with it
+        scores = []
+    return clean({"bets": bets, "scores": scores, "updated": dt.datetime.now().isoformat(timespec="seconds"),
+                  "in_play": any(b.get("in_play") for b in bets) or any(g["state"] == "in" for g in scores),
+                  "kelly_fraction": config.KELLY_FRACTION})
 
 
 @app.post("/api/live/cashout")
@@ -455,6 +515,52 @@ def api_cashout(req: CashOutReq):
     v = live.bet_view(row.iloc[0].to_dict(), sd, legs)
     return clean({**live.cash_out(req.offer, v["payout"], v["worth_share"], req.bankroll, config.KELLY_FRACTION),
                   "bet_id": req.bet_id, "stake": v["stake"]})
+
+
+@app.get("/api/odds")
+def api_odds():
+    """Line movement for every upcoming game (opening number, every logged change, the number now) and the
+    props whose line has moved since it opened."""
+    log = oddslog.load()
+    games, props = [], []
+    for r in STATE["results"]:
+        sport = r["sport"]
+        if r.get("games") is None or r["games"].empty:
+            continue
+        for g in r["games"].to_dict(orient="records"):
+            now, opened = g.get("line") or {}, g.get("open_line") or {}
+            feed = STATE["feed"].get((sport, g["home"], g["away"]))
+            games.append({"sport": sport, "game_id": g["game_id"], "game": g["game"], "home": g["home"], "away": g["away"],
+                          "start": g["start"], "edited": bool(g.get("edited")), "open": opened, "now": now, "feed": feed,
+                          "move": oddslog.movement(opened, now), "model_margin": g.get("model_margin"), "model_total": g.get("model_total"),
+                          "series": oddslog.series(log, sport, g["home"], g["away"], g["start"])})
+        seen = set()
+        for l in r["legs"]:
+            ol = l.get("open_line")
+            if ol is None or l["market"] in ("Moneyline", "Spread", "Total") or (l["player_key"], l["market_key"]) in seen or l.get("line") is None:
+                continue
+            seen.add((l["player_key"], l["market_key"]))
+            if abs(float(l["line"]) - float(ol)) > 1e-9:
+                props.append({"sport": sport, "player": l["subject"], "market": l["market"], "game": l["game"], "game_id": l["game_id"],
+                              "open_line": float(ol), "line": float(l["line"]), "move": float(l["line"]) - float(ol),
+                              "sim_over": l.get("sim_over"), "start": l.get("start")})
+        for pl in r.get("prop_lines") or []:
+            ol = pl.get("open_line")
+            if ol is not None and abs(float(pl["line"]) - float(ol)) > 1e-9:
+                props.append({"sport": sport, "player": pl["player"], "market": pl["market"], "game": pl["game"], "game_id": pl["game_id"],
+                              "open_line": float(ol), "line": float(pl["line"]), "move": float(pl["line"]) - float(ol),
+                              "sim_over": pl.get("p_over"), "start": pl.get("start")})
+    size = lambda p: -abs(p["move"]) / max(abs(p["open_line"]), 2.0)  # noqa: E731  biggest move for its size first
+    counts, top = {}, []
+    for sport in sorted({p["sport"] for p in props}):  # the biggest movers of each sport, so a sport filter still has a full list
+        mine = sorted((p for p in props if p["sport"] == sport), key=size)
+        counts[sport] = len(mine)
+        top += mine[:45]
+    top.sort(key=size)
+    return clean({"games": games, "props": top, "prop_moves": len(props), "prop_moves_by_sport": counts, "checked_at": STATE["checked_at"],
+                  "check_minutes": config.ODDS_CHECK_MINUTES, "auto_update_minutes": config.AUTO_UPDATE_MINUTES,
+                  "stale_games": _stale_games(), "log_rows": int(len(log)),
+                  "log_since": None if log.empty else str(log["ts"].min())})
 
 
 @app.get("/api/track")
@@ -492,6 +598,7 @@ def serve(host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True, 
     _load_overrides()
     if autorun:
         start_run()
+    threading.Thread(target=_odds_loop, daemon=True).start()
     if open_browser:
         import webbrowser
 
