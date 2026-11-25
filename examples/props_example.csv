@@ -1,0 +1,20 @@
+sport,player,market,line,over_odds,under_odds
+nba,Nikola Jokic,pts,27.5,-115,-105
+nba,Nikola Jokic,reb,12.5,-110,-110
+nba,Nikola Jokic,ast,9.5,+105,-125
+nba,Nikola Jokic,pra,47.5,-110,-110
+nba,Jamal Murray,pts,22.5,-110,-110
+nba,Cade Cunningham,pts,25.5,-115,-105
+nba,Cade Cunningham,ast,8.5,-120,+100
+nba,Jayson Tatum,pts,24.5,-110,-110
+nba,Jayson Tatum,reb,7.5,-125,+105
+nba,Cooper Flagg,pts,20.5,-110,-110
+nba,Franz Wagner,pts,21.5,-110,-110
+nba,Desmond Bane,fg3m,2.5,-130,+110
+nfl,Josh Allen,pass_yds,229.5,-115,-105
+nfl,James Cook,rush_yds,84.5,-110,-110
+nfl,Jahmyr Gibbs,anytime_td,0.5,-170,
+nfl,Jahmyr Gibbs,rush_rec_yds,119.5,-110,-110
+nfl,Bijan Robinson,rush_yds,89.5,-110,-110
+nfl,Jonathan Taylor,receptions,3.5,+110,-130
+nfl,Kyren Williams,rec_yds,29.5,-110,-110

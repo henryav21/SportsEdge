@@ -1,0 +1,292 @@
+# sportsedge: NFL and NBA picks, props and parlays
+
+`sportsedge` predicts NFL and NBA games and player props from free public data. It compares each
+prediction with the sportsbook's price, then ranks single bets and parlays by **expected value**. It also
+lists the picks that are **most likely to win**.
+
+```powershell
+py -m venv .venv
+.\.venv\Scripts\pip install -r requirements.txt
+.\sportsedge ui                     # the dashboard in your browser
+.\sportsedge share                  # the dashboard, reachable from anywhere
+.\sportsedge slate                  # today's NBA + this week's NFL, in the terminal
+.\sportsedge slate --sport nba --bankroll 500
+.\sportsedge grade                  # settle past picks, show the real track record
+.\sportsedge backtest               # how it would have done vs real closing lines
+.\sportsedge factors --sport nfl    # what the model learned
+```
+
+`.\sportsedge` is a small launcher in the project folder that runs the tool with the project's own
+Python (the `.venv` folder). It is short for `.\.venv\Scripts\python -m sportsedge`. Plain `python -m
+sportsedge` uses your system Python, which does not have the libraries installed.
+
+Each `slate` run prints to the terminal. It also writes an HTML report and a CSV of every priced bet
+to `output/`. The first run downloads several seasons of data and tests the prop simulators on past
+lines, which takes a few minutes. Later runs use the cache in `.cache/`.
+
+## The dashboard
+
+`.\sportsedge ui` starts a local server at http://127.0.0.1:8765 and opens it in your browser.
+Only this computer can reach it. It runs the model in the background, and **Refresh** re-downloads
+odds, injuries and weather and reruns everything.
+
+| Page | What's there |
+|---|---|
+| **Today** | Value bets, most-likely picks (games and props), suggested parlays, and a card per game: the sportsbook's line beside the model's own number, win chance, QB, weather and back-to-back context, and the biggest model factors. |
+| **Player props** | A prop board laid out like a sportsbook's: player, stat, line, Over and Under. Beside each line is the simulator's projection and how far it disagrees with the book. Also the test results for the prop simulator, a form to price a line from your own sportsbook, and the full projection table. |
+| **Live** | Every bet you recorded as it stands right now, pick by pick, with real scores and stat lines, what the bet is worth, and a check on your sportsbook's cash-out offer. |
+| **Results** | How logged picks have done: units won over time, a chart of predicted vs actual win rates, results by list and bet type, closing-line value, and **My bets**. |
+| **How it works** | The steps behind a pick, the game model's record against closing lines, the prop simulator's record against real lines, and every factor's learned weight. |
+
+Every pick carries a rating: **Value** (positive expected return and a real edge), **Fair**, **Poor
+price**, or **Check news** (the model is far from the sportsbook, which usually means news it has not
+seen). The **? Guide** button explains every number in plain language.
+
+**Bet slip** (right side, or the button at the bottom on a phone):
+- Prices any combination you build: combined odds, the chance to win, fair odds, and expected return.
+- Legs from the same game use the correlation measured in the simulation.
+- **Odds on your sportsbook's slip**: build the same bet at your sportsbook and copy the odds it shows
+  for the whole bet. The box starts at the standard price worked out from each pick's own odds. The slip
+  then says plainly whether the bet is worth it, with a quarter-Kelly stake.
+- **Record bet** saves it under My bets, where it's settled automatically. Place the actual bet at your sportsbook.
+
+**If a line looks wrong.** Lines reach the tool through ESPN's feed of DraftKings prices, which can
+run behind the sportsbook. Check the line against your sportsbook before betting.
+- For a game, open **Different at your sportsbook? Correct the line** on its card and type the
+  current spread, total or odds. The game is re-priced as if the feed had delivered those numbers. The
+  correction is saved in `history/line_corrections.json` and kept, across restarts, until the feed changes.
+- For a prop, use **Price a line from your sportsbook** and say where the line is from. A DraftKings
+  line that moved replaces the tool's copy and is priced on its own odds. A line from another
+  sportsbook is compared with the DraftKings line, so a line or price that is out of step shows as an edge.
+
+## Live tracking and cashing out
+
+Record a bet from the bet slip and the **Live** page follows it. It checks for new numbers every 30
+seconds while a game is on.
+- Each pick shows the score and clock, the player's current stat against the line ("18 of 24.5, needs
+  7 more"), and whether it is already decided. An over that has been reached is won before the game ends.
+- A pushed or void pick drops out of a parlay and the payout shrinks, as at a sportsbook.
+- **Worth right now** is what the bet would pay multiplied by the chance the remaining picks win.
+
+**Thinking of cashing out?** Type the offer your sportsbook shows. The page compares it with what the
+bet is worth and says hold or cash out.
+- Sportsbooks usually offer less than a bet is worth and keep the difference. The page shows that cut.
+- A sure amount is worth more than a gamble with the same average, more so when the possible win is
+  large next to your bankroll. With a bankroll set, the page shows the amount at or above which cashing
+  out makes sense for you. It uses the same risk setting that sizes stakes (quarter Kelly).
+- It also shows how low the chance of winning would have to be for the offer to be the better deal.
+
+The scores and stats are real. The live chances are **rough estimates**, simpler than the pre-game models:
+- moneylines use ESPN's own live win probability;
+- spreads and totals assume the rest of the game is played at the pre-game pace, with less uncertainty
+  as the clock runs down;
+- props assume the player keeps producing at a blend of his projection and tonight's pace.
+
+They do not know about foul trouble, injuries during the game, blowouts or who has the ball.
+
+## Reach it from anywhere
+
+`.\sportsedge share` gives the dashboard a permanent `https://<name>.vercel.app` address you
+can open on your phone. All the work still happens on this computer, so it has to stay on with that
+command running. (The prediction engine needs about 630 MB of libraries and a long-running process,
+which Vercel does not allow, so Vercel only provides the address.)
+
+One-time setup:
+1. `.\sportsedge passcode` and choose a passcode. Only a scrambled form of it is saved.
+2. Make sure the two free helper tools are installed: `cloudflared` (`winget install Cloudflare.cloudflared`)
+   and an up-to-date Vercel CLI signed in to your account (`npm i -g vercel@latest`, then `vercel login`).
+
+Then each time: `.\sportsedge share`, and open the address it prints.
+- It starts the dashboard if needed, opens a secure outbound tunnel, points your Vercel address at it,
+  and keeps the computer awake. If the tunnel drops it reconnects by itself.
+- The address stays the same every time. When the command is not running it shows an error page.
+- Anything arriving from outside needs the passcode. Sessions last 30 days per device, eight wrong tries
+  lock that visitor out for 15 minutes, and until a passcode is set the address shows only a "locked"
+  page. Browsers on this computer are never asked.
+- `.\sportsedge passcode` again changes it and signs every device out.
+  `.\sportsedge passcode --clear` locks remote access.
+
+## What goes into a prediction
+
+**NFL games**
+- Opponent-adjusted team ratings, recalculated every week with recent games weighted more heavily:
+  points, EPA/play, passing EPA per dropback, rushing EPA per carry, yards per attempt and per carry,
+  sack rate, turnover rate, explosive-play rate, pace (plays per game), and pass rate.
+- Starting-QB quality: EPA/play, shrunk toward replacement level when the sample is small. If the
+  usual starter is listed Out or Doubtful, the backup's numbers are used.
+- Injuries: the expected snap share of players listed Out or Doubtful, split into skill players,
+  offensive line and defense.
+- Rest (byes and short weeks), travel distance, time-zone change, neutral site, and division games.
+- Weather: temperature, wind, precipitation and snow at the stadium (Open-Meteo forecast and history),
+  and whether the game is played indoors.
+
+**NBA games**
+- Opponent-adjusted ratings: points, offensive rating, pace, eFG%, turnover %, offensive-rebound %,
+  free-throw rate, and 3-point attempt rate.
+- Rest days, back-to-backs, travel since the last game, time-zone change, and altitude (Denver, Utah).
+- Missing players: expected minutes multiplied by per-minute impact for every rotation player who is
+  out. Training uses box-score absences. Live games use the ESPN injury report.
+
+**Player props**: the prop models are Monte Carlo simulations built on the game simulation.
+- NFL: team plays, then the pass/rush split (adjusted for game script), then **target share, carry share
+  and touch share**, then catch rate and yards per catch or carry. Opponent yards allowed to the
+  position, wind and rain also enter. Touchdowns come from simulated team points.
+- NFL roles: a player's share is his average over the games he played, and a team's shares are
+  rescaled to add up to 100%. Sportsbooks post lines only for players with a role, so on a team with
+  lines posted, a player without one is held to a small share. That stops a fill-in from keeping the
+  starter's workload on paper after the starter returns.
+- NBA: projected minutes (rescaled when teammates are out), then the player's per-minute share of team
+  points, rebounds, assists and threes, applied to the simulated team output. Blowout minutes are
+  included. A prop is void when the player sits, so each player's numbers use his minutes *if he plays*.
+- Teammates share one simulated game, so props are correlated the way they are in real games. Parlays
+  need that.
+
+## How "unbiased" is handled
+
+- **No hand-set weights.** Every factor weight is fitted by regression. Prop dispersion, game-script and
+  weather effects are estimated from data.
+- **No look-ahead.** Features for a game use only games played before it. The backtest is walk-forward:
+  each season is predicted by a model trained only on earlier seasons.
+- **The market is treated as evidence.** Closing lines are very accurate. The tool fits how much weight
+  the model deserves against the line on out-of-sample games, and keeps that weight only if it also
+  lowers error in **leave-one-season-out cross-validation**. Otherwise the weight is 0 and the tool
+  defers to the market. The model's raw number, the market line, and the blend all appear side by side.
+- **Probabilities are anchored to the market.** A game-line probability starts from the no-vig price.
+  The model then moves it only by its point difference from the line, priced through a learned score
+  distribution. That distribution comes from what happened in past games with similar lines, so key
+  numbers are included: pushes on 3 and 7 are about 9% and 6%, and favourites of 10 or more win as
+  often as history says.
+- **Props are centred on the market.** Across a whole slate the prop simulator is shifted so that, on
+  average, it agrees with the sportsbook for each stat. What is left is its opinion about one player
+  relative to the others, which is the only part that can carry an edge.
+- **No vig in comparisons.** Market probabilities use the power method to remove the vig, so edges
+  are measured against fair prices.
+- **Long shots need a bigger edge.** Backtests show moneylines longer than +250 are where win probabilities
+  are least precise, so those must clear a 5-point edge instead of 2 points.
+- **Big disagreements are flagged, not sold.** When the model is far from the sportsbook (a prop more
+  than 30 points of probability away), the pick is labelled Check news and never listed as value.
+
+### What the backtest found (walk-forward, real closing lines)
+
+| | NFL (2,390 games, 2018-26) | NBA (4,185 games, 2023-27) |
+|---|---|---|
+| Margin error: model vs closing line | 10.08 vs 9.80 pts | 11.06 vs 10.76 pts |
+| Total error: model vs closing line | 10.57 vs 10.42 pts | 14.84 vs 14.33 pts |
+| Model weight that survives cross-validation | sides 0%, totals 18% | sides 0%, totals 0% |
+| Live win-probability log loss vs no-vig closing ML | 0.6088 vs 0.6087 | 0.5797 vs 0.5797 |
+| Replay of model-only bets at closing prices | spreads -2.5%, totals -0.4% ROI | spreads -3.4%, totals -4.9% ROI |
+
+In short, the game model doesn't beat closing lines on sides in either sport, and the tool says so
+instead of inventing edges. NFL totals are the one game market where the model shows a small signal.
+Its totals bets lost only 0.4% over 1,931 bets, where random betting at -110 loses about 4.5%. Lines
+earlier in the week are softer than closing lines.
+
+### What the prop test found (real sportsbook lines)
+
+For each past game the prop simulator is run as it would have been that morning, then compared with
+the DraftKings line ESPN published for that game and with what the player actually did
+(`propcheck.py`). It reruns automatically for each new game day.
+
+| | NBA | NFL |
+|---|---|---|
+| Real lines tested | 23,186 closing lines **with prices** (30 game days) | 5,028 lines, **no prices** (8 weeks) |
+| Simulator weight that survives leave-one-day-out testing | 10% | 25% (against the line as an even bet) |
+| Simulator's strong leans (15 to 30 points from the book) won | 50.4% of 3,378 (book implied 49.3%) | 56.0% of 989 (yardage stats only: 53.6%) |
+| Needed to beat the book's fee | 52.4% at -110 | 52.4% to 54.5% at -110 to -120 |
+| Betting every prop blind | -6.4% (the book's fee) | not measurable without prices |
+
+- **NBA:** the sportsbook's closing prop prices predicted outcomes better than the simulator, so a
+  prop's win chance is 90% the book's own price. Expect few or no value props at DraftKings prices.
+  Value is most likely when another sportsbook's line is out of step with DraftKings.
+- **NFL:** the simulator's side of real lines won more often, which is encouraging, but prices were
+  not available, so this is not proof of profit. On receptions and touchdowns one side often costs
+  much more than the other. The replay is not told who sat out, which is slightly harder than real use.
+- Building the test fixed two real biases. The NBA simulator had been discounting bench minutes by how
+  often a player appears, which is wrong for a prop (projected points for 15+ minute players went from
+  0.3 low to dead on). The NFL simulator had been giving out more than 100% of a team's targets and
+  carries (receiving yards were projected 27% too high).
+
+## Tracking results
+
+Every `slate` run logs each priced pick and each listed parlay to `history/picks.csv` and
+`history/parlays.csv`. Each bet is stored once; if you rerun before the game, the latest price
+replaces the earlier one.
+- `grade` settles finished games using official results: nflverse scores and box scores, and
+  stats.nba.com game logs. A prop on a player who didn't play is void, as at a sportsbook. `slate`
+  also grades automatically before it prices a new slate.
+- `grade` records **closing-line value**: whether the number you were shown beat the sportsbook's
+  last number before the game. That is the earliest reliable sign of a real edge, well before
+  win-loss records mean anything.
+  - Game lines: points for spreads and totals, no-vig probability for moneylines.
+  - Props: compared with the closing prop line from the same feed. If the line moved, a lower closing
+    line is good for an under and a higher one for an over. If the line is the same, the pick is judged
+    on whether its side's no-vig price shortened. Results shows how many props beat the close.
+- The report breaks results down by list (value bets, most-likely picks, all game lines, all
+  props) and by market. It shows ROI with a 95% range, a calibration table (do 60% picks win 60%
+  of the time?), and log loss for the tool, the no-vig market and the raw prop simulator.
+- **The prop weight keeps learning from your results.** It starts at the weight from the prop test
+  above. Once 150 of your own props are graded, the weight that best fits them is blended in.
+- Use `--no-track` when testing with made-up lines (like `examples/props_example.csv`) so they don't
+  pollute the history.
+- `python -m unittest discover tests` runs the settlement, prop, live and passcode tests.
+
+## Prop lines
+
+Game lines (moneyline, spread, total) and prop lines come from ESPN's public feed of DraftKings prices
+and need no key.
+- **NBA props** arrive with lines and prices, so they are fully priced.
+- **NFL props** arrive with lines only. The board shows the simulator's projection and lean for each;
+  type in your sportsbook's odds to get an expected return.
+- Optional: a free key from [the-odds-api.com](https://the-odds-api.com) (500 credits/month) in `.env` as
+  `ODDS_API_KEY=...` adds priced NFL props. Each game costs about 10 credits per refresh.
+- Optional: `--props-csv my_lines.csv` with columns `sport,player,market,line,over_odds,under_odds`.
+  `examples/props_example.csv` shows the format. Its lines are made up, for testing only.
+  - NFL markets: `pass_yds pass_tds pass_cmp pass_att rush_yds rush_att rec_yds receptions rush_rec_yds anytime_td`
+  - NBA markets: `pts reb ast fg3m stl blk pra pr pa ra`
+- Your own lines take priority over The Odds API, which takes priority over the ESPN feed.
+  Set `ESPN_PROPS = False` in `config.py` to turn the free feed off.
+
+## Reading the output
+
+| Column | Meaning |
+|---|---|
+| Win chance (Model %) | The tool's probability of winning. For bets that can push, it is the probability of winning given no push. |
+| Book's chance (No-vig mkt %) | The sportsbook's probability with the vig removed |
+| Edge | Win chance minus the book's chance, in percentage points |
+| Expected return (EV/unit) | Expected profit per 1 unit staked (+0.05 = +5%) |
+| Stake (Kelly) | Quarter-Kelly fraction of bankroll, capped at 3% |
+| Fair odds (parlays) | The price at which a parlay breaks even under the model |
+| Win together (correlation lift) | How much more often same-game legs hit together than if they were independent |
+
+Parlay lists:
+- **Best value**: every leg is +EV and each leg is from a different game.
+- **Most likely to hit**: the most likely combinations that still pay +150 or more.
+- **Same game**: legs that are positively correlated. Books reprice same-game parlays, so bet one
+  only when the offered price is at or above the fair odds.
+
+## Settings and code
+
+`sportsedge/config.py` holds the settings: decay half-lives, Kelly fraction, parlay size, the minimum
+edge to flag, and the seasons used.
+
+| File | Role |
+|---|---|
+| `ratings.py` | Time-decayed, opponent-adjusted ridge ratings |
+| `nfl.py`, `nba.py` | Data loading and game features |
+| `gamemodel.py` | Margin and total models, market blend, learned score distributions |
+| `nfl_props.py`, `nba_props.py` | Player-prop simulators |
+| `propcheck.py` | Replays the prop simulators on real past lines and learns their weight |
+| `markets.py`, `parlay.py` | Pricing, market centring, EV, Kelly, parlay search |
+| `sources.py` | ESPN (schedule, odds, prop lines, injuries), Open-Meteo, The Odds API |
+| `tracker.py` | Logs picks and your bets, settles them, closing-line value, learned prop weight |
+| `live.py` | Live scores and stat lines for open bets, live chances, cash-out check |
+| `web.py`, `ui/` | Local dashboard: API server plus a plain HTML/JS page (no build step) |
+| `access.py`, `share.py`, `remote/` | Passcode gate, and the tunnel plus Vercel address for reaching it from anywhere |
+| `backtest.py`, `report.py`, `cli.py` | Evaluation and output |
+
+Data sources: nflverse (`nflreadpy`), stats.nba.com (`nba_api`), ESPN public endpoints (odds, prop
+lines, injuries, historical lines), Open-Meteo (weather), and optionally The Odds API.
+
+Every prediction is a probability, not a guarantee. Sportsbooks keep a margin on every bet, and even a
+good model loses often over short stretches. Track your results, and only stake money you can afford
+to lose.

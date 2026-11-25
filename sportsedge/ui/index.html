@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>sportsedge</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232a78d6'/%3E%3Cpath d='M8 21l6-6 4 4 6-8' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><span class="mark" aria-hidden="true">
+      <svg width="14" height="14" viewBox="0 0 32 32"><path d="M4 23l8-8 5 5 11-12" stroke="white" stroke-width="4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </span>sportsedge</div>
+    <nav class="tabs" aria-label="Pages">
+      <button data-act="nav" data-page="slate">Today</button>
+      <button data-act="nav" data-page="props">Player props</button>
+      <button data-act="nav" data-page="live">Live</button>
+      <button data-act="nav" data-page="track">Results</button>
+      <button data-act="nav" data-page="model">How it works</button>
+    </nav>
+    <div class="top-right">
+      <div id="status" class="status" role="status" aria-live="polite"></div>
+      <button class="btn" data-act="refresh" id="refreshBtn" title="Download the latest odds, injuries and weather, then re-run everything">Refresh</button>
+      <label class="bankroll" title="Your betting budget. Stake suggestions are shown in dollars once this is set."><span>Bankroll $</span><input id="bankroll" type="number" min="0" step="10" placeholder="0" aria-label="Bankroll in dollars"></label>
+      <button class="btn help-btn" data-act="guide" aria-label="Open the guide: what the numbers mean">? Guide</button>
+    </div>
+  </header>
+  <div class="layout">
+    <main id="main" tabindex="-1"></main>
+    <aside class="slip" id="slip" aria-label="Bet slip"></aside>
+  </div>
+  <button class="btn primary slip-toggle" data-act="slip-toggle" id="slipToggle">Bet slip</button>
+  <dialog id="guide" aria-labelledby="guide-title"></dialog>
+  <script src="/static/app.js"></script>
+</body>
+</html>
