@@ -276,13 +276,11 @@ summary.hd .sub { color: var(--muted); font-size: 12.5px; }
 code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
 @media (max-width: 640px) {
   header.top { flex-wrap: wrap; gap: 8px 12px; padding: 8px 12px; }
-  nav.tabs { order: 3; width: 100%; overflow-x: auto; }
   nav.tabs button { white-space: nowrap; }
   .status > span:last-child { display: none; }
   .layout { padding: 12px; }
   .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
   .tile .value { font-size: 20px; }
-  table.t { min-width: 640px; }
   .games { grid-template-columns: 1fr; }
   .two { grid-template-columns: 1fr; }
   .form-row .player input { width: 100%; }
@@ -376,13 +374,9 @@ details > summary.muted:hover { color: var(--ink); }
   .page-hd h1 { font-size: 19px; }
   dl.gloss { grid-template-columns: 1fr; gap: 2px; }
   dl.gloss dd { margin-bottom: 8px; }
-  .jump { overflow-x: auto; flex-wrap: nowrap; padding-bottom: 2px; scrollbar-width: none; }
-  .jump::-webkit-scrollbar { display: none; }
   .jump > .muted { white-space: nowrap; }
-  .jump button { white-space: nowrap; }
   .leg-row { grid-template-columns: 62px 1fr 1fr; }
   .banner.intro { flex-direction: column; align-items: flex-start; }
-  table.board { min-width: 720px; }
   .top-right { gap: 8px; }
 }
 
@@ -490,11 +484,113 @@ details.why[open] > summary { margin-bottom: 8px; }
   .games { grid-template-columns: 1fr; }
   .mk-main { font-size: 13px; }
   .mk-sub { font-size: 10.5px; }
-  .gp-cols, .gp-row, .pgame .gp-wrap.full .gp-cols, .pgame .gp-wrap.full .gp-row { grid-template-columns: minmax(0, 1fr) 40px 84px 84px; gap: 5px; }
-  .gp-row .side-btn { padding: 4px 5px; gap: 0 4px; }
-  .gp-row .side-btn .p { font-size: 11.5px; }
 }
 
 /* a game's props on the Player props page sit inside <details>, so the usual card padding is set here */
 .pgame .bd { padding: 2px 16px 12px; }
 .pgame > details:not([open]) > summary.hd { padding-bottom: 14px; }
+
+/* ================================================================== small screens: nothing scrolls sideways, nothing is squeezed */
+nav.tabs .short, .gsel { display: none; }
+.gp-chips { flex-wrap: wrap; overflow: visible; padding-bottom: 8px; }
+
+/* a game's prop rows adapt to the width of the block they are in, not of the screen */
+.gp-wrap { container-type: inline-size; }
+@container (max-width: 440px) {
+  .gp-cols { display: none; }
+  .gp-wrap .gp-row, .pgame .gp-wrap.full .gp-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 7px 8px; padding: 10px 0; }
+  .gp-who { grid-column: 1 / -1; padding-right: 62px; min-height: 34px; }
+  .gp-line { grid-column: 1 / -1; grid-row: 1; justify-self: end; align-self: start; text-align: right; line-height: 1.15; }
+  .gp-line b { font-size: 16px; }
+  .gp-line b::before { content: "line"; display: block; font-size: 10.5px; font-weight: 400; color: var(--muted); }
+  .gp-o { grid-column: 1; }
+  .gp-u { grid-column: 2; }
+  .gp-two { grid-column: 1 / -1; text-align: left; }
+  .gp-row .side-btn { padding: 6px 10px; }
+  .gp-player { padding-top: 14px; }
+}
+
+/* tablets and phones: the header wraps, with the page tabs on their own full-width row */
+@media (max-width: 900px) {
+  header.top { flex-wrap: wrap; gap: 8px 10px; padding: 8px 14px; }
+  nav.tabs { order: 3; width: 100%; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 2px; overflow: visible; }
+  nav.tabs button { padding: 7px 2px; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .top-right { gap: 8px; }
+}
+
+/* narrow tablets and phones: wide tables become a list of labelled cards */
+@media (max-width: 760px) {
+  .tw { overflow-x: visible; }
+  table.t, table.board { min-width: 0; }
+  table.t.stack thead { display: none; }
+  table.t.stack, table.t.stack tbody { display: block; width: 100%; }
+  table.t.stack tr { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px 12px; padding: 12px 14px; border-bottom: 1px solid var(--grid); align-items: start; }
+  table.t.stack.dense tr { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  table.t.stack tr:last-child { border-bottom: 0; }
+  table.t.stack td { display: block; padding: 0; border: 0; text-align: left; white-space: normal; min-width: 0; font-size: 13.5px; }
+  table.t.stack td.num { text-align: left; font-variant-numeric: tabular-nums; }
+  table.t.stack td[data-label]::before { content: attr(data-label); display: block; font-size: 10.5px; line-height: 1.3; color: var(--muted); font-weight: 400; margin-bottom: 1px; }
+  table.t.stack td.main { grid-column: 1 / -1; font-size: 14px; }
+  table.t.stack tr.has-add td.main { grid-column: 1 / 3; grid-row: 1; }
+  table.t.stack td.c-add { grid-column: 3; grid-row: 1; justify-self: end; width: auto; padding: 0; }
+  table.t.stack td.c-add .add { width: 34px; height: 34px; font-size: 18px; }
+  table.t.stack td.act { grid-column: 1 / -1; }
+  table.t.stack td.act .btn { width: 100%; padding: 7px; }
+  table.t.stack td:empty { display: none; }
+  table.t.stack .wc { justify-items: start; }
+  table.t.stack .side-btn { min-width: 0; width: 100%; }
+  table.t.stack .lean { grid-template-columns: minmax(40px, 70px) auto; }
+  table.t.stack tr.clickable:active td { background: none; }
+  .gstrip { display: none; }
+  .gsel { display: block; width: 100%; margin: 0 0 10px; padding: 9px 10px; font-size: 14px; }
+  .card > .hd .right { margin-left: 0; width: 100%; }
+  .card > .hd .right .seg { width: 100%; display: flex; }
+  .card > .hd .right .seg button { flex: 1; padding: 6px 4px; }
+  .filters > .seg { display: flex; }
+  .filters > input[type=search] { flex: 1; min-width: 140px; }
+}
+
+@media (max-width: 640px) {
+  body { font-size: 14.5px; }
+  .layout { padding: 12px 10px 76px; }
+  .jump { flex-wrap: wrap; overflow: visible; width: 100%; margin-left: 0; }
+  .jump button { padding: 5px 11px; }
+  .filters { gap: 8px; }
+  /* stat tiles become compact rows: name and note on the left, the number on the right */
+  .tiles { grid-template-columns: 1fr; gap: 6px; }
+  .tile { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 12px; align-items: center; padding: 9px 12px; }
+  .tile .label { grid-column: 1; grid-row: 1; }
+  .tile .value { grid-column: 2; grid-row: 1 / span 2; margin: 0; font-size: 20px; text-align: right; }
+  .tile .delta { grid-column: 1; grid-row: 2; margin: 0; }
+  .card > .hd { padding: 12px 12px 8px; }
+  .card > .bd { padding: 4px 12px 12px; }
+  .card > .bd.flush { padding: 0 0 4px; }
+  .empty { padding: 14px 12px; }
+  .game { padding: 12px; }
+  .mkt { gap: 5px; }
+  .mk-btn { padding: 7px 2px; }
+  .page-hd p { font-size: 13px; }
+  .pgame .bd { padding: 2px 12px 10px; }
+  .pgame > details > summary.hd { flex-wrap: wrap; row-gap: 2px; }
+  .pgame > details > summary.hd h2 { white-space: nowrap; }
+  .pgame > details > summary.hd .sub { order: 3; flex-basis: 100%; }
+  .pgame > details > summary.hd .right { margin-left: auto; }
+  .form-row label { flex: 1 1 120px; }
+  .form-row input[type=number], .form-row select { width: 100%; }
+  .form-row .btn { flex: 1 1 100%; padding: 9px; }
+  .bankroll input { width: 96px; }
+  .slip-toggle { right: 12px; bottom: 12px; padding: 10px 16px; }
+  .fix-grid { grid-template-columns: 46px repeat(3, minmax(0, 1fr)); gap: 6px; }
+  .legend { gap: 6px 12px; }
+  dialog#guide { width: calc(100vw - 16px); max-height: 92vh; }
+}
+
+@media (max-width: 520px) {
+  nav.tabs .full, .help-btn .full, .brand-name { display: none; }
+  nav.tabs .short { display: inline; }
+  .help-btn { padding: 6px 11px; }
+  header.top { padding: 8px 10px; gap: 6px 8px; }
+  .top-right { gap: 6px; margin-left: auto; }
+  .day-hd { margin-top: 14px; }
+  table.t.stack.dense tr { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}

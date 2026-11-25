@@ -306,7 +306,9 @@ function pageSlate() {
   for (const x of sched) { const k = dayKey(x.g.start); if (!days.length || days[days.length - 1].k !== k) days.push({ k, label: dayLabel(x.g.start), items: [] }); days[days.length - 1].items.push(x); }
   const games = days.map((d) => `<h3 class="day-hd">${d.label} <span class="muted">${d.items.length} game${d.items.length === 1 ? "" : "s"}</span></h3>
     <div class="games">${d.items.map(({ g, s }) => gameCard(g, s, both)).join("")}</div>`);
-  const strip = sched.length > 3 ? `<nav class="gstrip" aria-label="Jump to a game">${sched.map(({ g, s }) => `<button data-act="jump" data-to="g-${s.sport}-${esc(g.game_id)}">${esc(g.away)} @ ${esc(g.home)} <span class="muted">${new Date(g.start).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" })}</span></button>`).join("")}</nav>` : "";
+  const gtime = (g) => new Date(g.start).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" });
+  const strip = sched.length > 3 ? `<nav class="gstrip" aria-label="Jump to a game">${sched.map(({ g, s }) => `<button data-act="jump" data-to="g-${s.sport}-${esc(g.game_id)}">${esc(g.away)} @ ${esc(g.home)} <span class="muted">${gtime(g)}</span></button>`).join("")}</nav>
+    <select class="gsel" data-jump="1" aria-label="Jump to a game"><option value="">Jump to a game ...</option>${sched.map(({ g, s }) => `<option value="g-${s.sport}-${esc(g.game_id)}">${esc(g.away)} @ ${esc(g.home)} · ${gtime(g)}</option>`).join("")}</select>` : "";
   const intro = S.introSeen ? "" : `<div class="banner intro"><div><b>How to read this page.</b>
       Each pick shows the <b>win chance</b> (the tool's estimate) next to the <b>book's chance</b> (what the odds imply after the sportsbook's fee is removed).
       When the win chance is clearly higher, the pick is rated <span class="rate r-value">Value</span>. Most picks are not: sportsbook prices are accurate, and a pick can be likely to win and still be a poor bet.
@@ -582,7 +584,9 @@ function propsByGame(s) {
       <summary class="hd"><h2>${esc(g.away)} @ ${esc(g.home)}</h2><span class="sub">${when(g.start)} · ${n} lines${mainLine ? ` · ${mainLine}` : ""}</span><span class="right muted caret" aria-hidden="true"></span></summary>
       <div class="bd">${open ? gameProps(s, g, { full: true }) : ""}</div></details></section>`;
   }).join("");
-  const strip = withLines.length > 1 ? `<nav class="gstrip" aria-label="Jump to a game">${withLines.map((g) => `<button data-act="pg-jump" data-pg="${s.sport}|${esc(g.game_id)}">${esc(g.away)} @ ${esc(g.home)} <span class="muted">${new Date(g.start).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" })}</span></button>`).join("")}</nav>` : "";
+  const gtime = (g) => new Date(g.start).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" });
+  const strip = withLines.length > 1 ? `<nav class="gstrip" aria-label="Jump to a game">${withLines.map((g) => `<button data-act="pg-jump" data-pg="${s.sport}|${esc(g.game_id)}">${esc(g.away)} @ ${esc(g.home)} <span class="muted">${gtime(g)}</span></button>`).join("")}</nav>
+    <select class="gsel" data-pgjump="1" aria-label="Jump to a game"><option value="">Jump to a game ...</option>${withLines.map((g) => `<option value="${s.sport}|${esc(g.game_id)}">${esc(g.away)} @ ${esc(g.home)} · ${gtime(g)}</option>`).join("")}</select>` : "";
   return `<div id="sec-board">${strip}
     ${sections || `<section class="card"><div class="empty">${q ? "No player matches that search." : "No prop lines are posted yet."}</div></section>`}
     ${without.length && !q ? `<p class="note">No lines posted yet for: ${without.map((g) => `${esc(g.away)} @ ${esc(g.home)}`).join(", ")}. Sportsbooks usually post them the day before a game.</p>` : ""}</div>`;
@@ -857,7 +861,7 @@ async function loadLive() {
   if (S.page !== "live") return;
   // do not redraw under someone typing an offer: refresh the numbers on the next pass instead
   const typing = document.activeElement && document.activeElement.classList.contains("offer");
-  if (!typing) $("#main").innerHTML = pageLive();
+  if (!typing) { $("#main").innerHTML = pageLive(); labelTables(); }
   for (const b of (S.live ? S.live.bets : [])) if (S.offers[b.id] && b.value > 0 && b.open) checkOffer(b.id, true);
   liveTimer = setTimeout(loadLive, S.live && S.live.in_play ? 30000 : 120000);
 }
@@ -1145,7 +1149,7 @@ function placeTip(el, t, x, y) {
 }
 
 function lineChart(el, series) {
-  const W = el.clientWidth || 600, H = 250, m = { l: 46, r: 120, t: 10, b: 26 };
+  const W = el.clientWidth || 600, narrow = W < 520, H = 250, m = { l: 46, r: narrow ? 16 : 120, t: 10, b: 26 };
   const dates = [...new Set(series.flatMap((s) => s.points.map((p) => p.date)))].sort();
   const t = (d) => Date.parse(d + "T12:00:00");
   let t0 = t(dates[0]), t1 = t(dates[dates.length - 1]);
@@ -1172,7 +1176,7 @@ function lineChart(el, series) {
   }
   ends.sort((a, b) => a.y - b.y);
   const collide = ends.some((e, i) => i && e.y - ends[i - 1].y < 15);
-  if (!collide) svg += ends.map((e) => `<text class="lab" x="${e.x + 9}" y="${e.y + 4}">${esc(e.text)}</text>`).join("");
+  if (!collide && !narrow) svg += ends.map((e) => `<text class="lab" x="${e.x + 9}" y="${e.y + 4}">${esc(e.text)}</text>`).join("");
   svg += `<line id="xh" x1="0" x2="0" y1="${m.t}" y2="${H - m.b}" stroke="var(--axis)" stroke-width="1" style="display:none"></line>`;
   svg += `<rect x="${m.l}" y="${m.t}" width="${W - m.l - m.r}" height="${H - m.t - m.b}" fill="transparent" id="hit"></rect></svg>`;
   el.innerHTML = svg;
@@ -1329,7 +1333,32 @@ function redrawPropGame(id) {
   if (g && box) $(".bd", box).innerHTML = gameProps(s, g, { full: true });
 }
 
+/* On a narrow screen a wide table is shown as a list of cards (see styles.css). For that each cell needs to
+   know its column's name, and the row's title cell and action cells need marking. */
+function labelTables(root = document) {
+  for (const t of $$("table.t", root)) {
+    if (t.dataset.labelled) continue;
+    t.dataset.labelled = "1";
+    const heads = $$("thead th", t).map((th) => ({ text: th.textContent.replace(/[↓↑]/g, "").replace(/\s+/g, " ").trim(), add: th.classList.contains("c-add") }));
+    if (!heads.length) continue;
+    t.classList.add("stack");
+    if (heads.length > 9) t.classList.add("dense");
+    const mainAt = heads.findIndex((h) => !h.add);
+    for (const tr of $$("tbody tr", t)) {
+      const tds = [...tr.children];
+      if (tds.length !== heads.length) continue;  // a full-width message row
+      tds.forEach((td, i) => {
+        if (heads[i].add) { td.classList.add("c-add"); tr.classList.add("has-add"); }
+        else if (i === mainAt) td.classList.add("main");
+        else if (heads[i].text) td.dataset.label = heads[i].text;
+        else td.classList.add("act");
+      });
+    }
+  }
+}
+
 function afterRender() {
+  labelTables();
   if (S.focusGame) { const el = document.getElementById(S.focusGame); S.focusGame = null; if (el) setTimeout(() => el.scrollIntoView({ block: "start", behavior: "smooth" }), 30); }
   if (S.focusForm && S.page === "props") { S.focusForm = false; const t = $("#pf-over"); if (t) setTimeout(() => { t.scrollIntoView({ block: "center", behavior: "smooth" }); t.focus({ preventScroll: true }); }, 30); }
   if (S.page === "track" && S.track && !S.track.error) {
@@ -1567,6 +1596,8 @@ document.addEventListener("input", (e) => {
 
 document.addEventListener("change", (e) => {
   const t = e.target;
+  if (t.dataset.jump && t.value) { const el = document.getElementById(t.value); t.value = ""; if (el) el.scrollIntoView({ block: "start", behavior: "smooth" }); return; }
+  if (t.dataset.pgjump && t.value) { const id = t.value; S.pgOpen = { ...(S.pgOpen || {}), [id]: true }; S.focusGame = `pg-${id.replace("|", "-")}`; renderMain(); return; }
   const bind = t.dataset.bind;
   if (bind && t.tagName === "SELECT") {
     const [obj, key] = bind.split(".");

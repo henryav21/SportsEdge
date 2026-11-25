@@ -11,19 +11,19 @@
   <header class="top">
     <div class="brand"><span class="mark" aria-hidden="true">
       <svg width="14" height="14" viewBox="0 0 32 32"><path d="M4 23l8-8 5 5 11-12" stroke="white" stroke-width="4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
-    </span>sportsedge</div>
+    </span><span class="brand-name">sportsedge</span></div>
     <nav class="tabs" aria-label="Pages">
-      <button data-act="nav" data-page="slate">Today</button>
-      <button data-act="nav" data-page="props">Player props</button>
-      <button data-act="nav" data-page="live">Live</button>
-      <button data-act="nav" data-page="track">Results</button>
-      <button data-act="nav" data-page="model">How it works</button>
+      <button data-act="nav" data-page="slate"><span class="full">Today</span><span class="short">Today</span></button>
+      <button data-act="nav" data-page="props"><span class="full">Player props</span><span class="short">Props</span></button>
+      <button data-act="nav" data-page="live"><span class="full">Live</span><span class="short">Live</span></button>
+      <button data-act="nav" data-page="track"><span class="full">Results</span><span class="short">Results</span></button>
+      <button data-act="nav" data-page="model"><span class="full">How it works</span><span class="short">About</span></button>
     </nav>
     <div class="top-right">
       <div id="status" class="status" role="status" aria-live="polite"></div>
       <button class="btn" data-act="refresh" id="refreshBtn" title="Download the latest odds, injuries and weather, then re-run everything">Refresh</button>
-      <label class="bankroll" title="Your betting budget. Stake suggestions are shown in dollars once this is set."><span>Bankroll $</span><input id="bankroll" type="number" min="0" step="10" placeholder="0" aria-label="Bankroll in dollars"></label>
-      <button class="btn help-btn" data-act="guide" aria-label="Open the guide: what the numbers mean">? Guide</button>
+      <label class="bankroll" title="Your betting budget. Stake suggestions are shown in dollars once this is set."><span>Bankroll $</span><input id="bankroll" type="number" min="0" step="10" placeholder="Bankroll $" aria-label="Bankroll in dollars"></label>
+      <button class="btn help-btn" data-act="guide" aria-label="Open the guide: what the numbers mean">?<span class="full"> Guide</span></button>
     </div>
   </header>
   <div class="layout">
