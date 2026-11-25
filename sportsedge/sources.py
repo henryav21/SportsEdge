@@ -339,6 +339,23 @@ ESPN_PROP_TYPES = {
             "Total Points and Assists": "pa", "Total Assists and Rebounds": "ra"},
 }
 ESPN_YES_ONLY = {"nfl": {"Anytime Touchdown Scorer": "anytime_td"}, "nba": {}}  # one price, no "No" side
+# "N or more" bets, one entry per threshold ("4+ receptions"): ESPN's name -> our stat. A trading app often lists
+# these where a sportsbook has an over/under. Only full-game stats the simulators cover.
+ESPN_RUNG_TYPES = {
+    "nfl": {"Passing Yards Milestones": "pass_yds", "Passing Touchdown Milestones": "pass_tds",
+            "Passing Completions Milestones": "pass_cmp", "Passing Attempts Milestones": "pass_att",
+            "Rushing Yards Milestones": "rush_yds", "Rushing Attempts Milestones": "rush_att",
+            "Receiving Yards Milestones": "rec_yds", "Receptions Milestones": "receptions",
+            "Rushing + Receiving Yards Milestones": "rush_rec_yds"},
+    "nba": {"Points Milestones": "pts", "Rebounds Milestones": "reb", "Assists Milestones": "ast",
+            "3-Point Field Goals Milestones": "fg3m", "Steals Milestones": "stl", "Blocks Milestones": "blk",
+            "Points + Assists + Rebounds Milestones": "pra", "Points + Rebounds Milestones": "pr",
+            "Points + Assists Milestones": "pa", "Rebounds + Assists Milestones": "ra"},
+}
+# touchdown scorers are the same thing on the touchdown count: anytime is 1+, then 2+ and 3+
+ESPN_RUNG_FIXED = {"nfl": {"Anytime Touchdown Scorer": ("anytime_td", 1), "Player to score 2 or more touchdowns": ("anytime_td", 2),
+                           "Player to score 3 or more touchdowns": ("anytime_td", 3)}, "nba": {}}
+RUNG_COLS = ["home", "away", "player", "key", "market", "n", "odds", "book"]
 PROP_COLS = ["home", "away", "player", "key", "market", "line", "over_odds", "under_odds", "book",
              "open_line", "open_over_odds", "open_under_odds"]
 
@@ -415,12 +432,44 @@ def parse_espn_props(sport: str, items: list[dict], names: dict) -> list[dict]:
     return rows
 
 
-def espn_props(sport: str, games: pd.DataFrame, ttl: float | None = 0.25) -> pd.DataFrame:
+def parse_espn_rungs(sport: str, items: list[dict], names: dict) -> list[dict]:
+    """The "N or more" bets in a game's prop feed: one row per player, stat and threshold, with its price where
+    the feed has one (NBA) and NaN where it does not (NFL)."""
+    types, fixed = ESPN_RUNG_TYPES[sport], ESPN_RUNG_FIXED[sport]
+    rows, seen = [], set()
+    for it in items:
+        t = (it.get("type") or {}).get("name")
+        aid = _athlete_id(it)
+        name = names.get(aid) if aid else None
+        if not name:
+            continue
+        if t in fixed:
+            market, n = fixed[t]
+        elif t in types:
+            market, n = types[t], ((it.get("current") or {}).get("target") or {}).get("value")
+        else:
+            continue
+        if n is None or float(n) < 1 or (aid, market, float(n)) in seen:
+            continue
+        seen.add((aid, market, float(n)))
+        price = _american(((it.get("odds") or {}).get("american") or {}).get("value"))
+        rows.append({"player": name, "key": norm_name(name), "market": market, "n": float(n), "odds": price})
+    return rows
+
+
+def espn_rungs(sport: str, games: pd.DataFrame, ttl: float | None = 0.25) -> pd.DataFrame:
+    """The "N or more" bets (and touchdown scorers) from the same feed, and the same cached download, as
+    espn_props()."""
+    return espn_props(sport, games, ttl, rungs=True)
+
+
+def espn_props(sport: str, games: pd.DataFrame, ttl: float | None = 0.25, rungs: bool = False) -> pd.DataFrame:
     """Player-prop lines published through ESPN's odds feed (DraftKings). Free, no key. Cached 15 minutes
     (ttl=None keeps a finished game's closing lines for good). NBA lines come with prices; NFL lines come
     without, so over_odds / under_odds are NaN there."""
+    cols = RUNG_COLS if rungs else PROP_COLS
     if games is None or games.empty:
-        return pd.DataFrame(columns=PROP_COLS)
+        return pd.DataFrame(columns=cols)
     (config.CACHE_DIR / "espn_props").mkdir(parents=True, exist_ok=True)
     core = f"https://sports.core.api.espn.com/v2/sports/{ESPN_CORE[sport]}"
 
@@ -440,7 +489,7 @@ def espn_props(sport: str, games: pd.DataFrame, ttl: float | None = 0.25) -> pd.
                 if page >= int(j.get("pageCount") or 1) or page >= 10:
                     break
                 page += 1
-            wanted = set(ESPN_PROP_TYPES[sport]) | set(ESPN_YES_ONLY[sport])
+            wanted = set(ESPN_PROP_TYPES[sport]) | set(ESPN_YES_ONLY[sport]) | set(ESPN_RUNG_TYPES[sport]) | set(ESPN_RUNG_FIXED[sport])
             return {"book": prov.get("name"), "items": [i for i in items if (i.get("type") or {}).get("name") in wanted]}
 
         try:
@@ -458,12 +507,13 @@ def espn_props(sport: str, games: pd.DataFrame, ttl: float | None = 0.25) -> pd.
             nm = _espn_athlete(sport, aid)
             if nm:
                 names[aid] = nm
+        parse = parse_espn_rungs if rungs else parse_espn_props
         return [{"home": g.home, "away": g.away, "book": got["book"] or "ESPN", **r}
-                for r in parse_espn_props(sport, got["items"], names)]
+                for r in parse(sport, got["items"], names)]
 
     with ThreadPoolExecutor(max_workers=6) as ex:
         rows = [r for part in ex.map(one, list(games.itertuples())) for r in part]
-    return pd.DataFrame(rows, columns=PROP_COLS)
+    return pd.DataFrame(rows, columns=cols)
 
 
 def espn_live_odds(sport: str, event_id: str, home_tid=None, away_tid=None) -> dict | None:

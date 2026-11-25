@@ -24,7 +24,8 @@ const S = {
   pv: localStorage.getItem("props_view") || "game", pg: localStorage.getItem("props_group") || "stat", pgOpen: null, // props page: view, grouping, open games
   focusGame: null, focusForm: false,
   odds: null, oddsAt: 0, movesGame: null, plays: null, gparOpen: {},
-  started: [], st: {}, slipLines: {}, boxOpen: {},
+  started: [], st: {}, slipLines: JSON.parse(localStorage.getItem("slip_lines") || "{}"), boxOpen: {},
+  slipRung: JSON.parse(localStorage.getItem("slip_rungs") || "{}"), rungAll: {},  // picks taken as "N or more"; ladders shown in full
   board: null, hedgeOdds: {},   // live prices for games in play; the odds typed into each hedge box
   importOpen: false, importText: "", importNote: null, importSingles: null, slipPayout: "",   // paste a slip from the sportsbook   // games that have started; per game: chosen stat, "show all"; lines typed in the slip
   live: null, liveErr: null, liveFirst: {}, offers: JSON.parse(localStorage.getItem("offers") || "{}"), cash: {},
@@ -65,8 +66,12 @@ const americanOf = (c) => (c >= 50 ? (-100 * c) / (100 - c) : (100 * (100 - c)) 
 const feeOf = (c) => (inCents() ? PX.flat + (PX.rate / 100) * c * (100 - c) / 100 : 0);  // the fee on one contract bought at c cents
 const fmtCents = (c) => (c == null || isNaN(c) ? "–" : `${c >= 10 && c <= 90 ? Math.round(c) : (Math.round(c * 10) / 10)}¢`);
 const fmtOdds = (a) => (a == null || isNaN(a) ? "–" : inCents() ? fmtCents(centsOf(a)) : a > 0 ? `+${Math.round(a)}` : `${Math.round(a)}`);
+/* A number from 1 to 99 can never be American odds (those are -100 or lower, +100 or higher): it is the price an
+   app shows as a percent (DraftKings' trade slip: 52%) or in cents. So it is read that way whichever way prices
+   are shown. */
+const isPercent = (x) => x > 0 && x < 100;
 /* What is in a price box as American odds, without adding a fee: for carrying a typed price across a switch. */
-const typedOddsRaw = (v) => { const x = parseFloat(v); return isNaN(x) ? NaN : inCents() ? (x > 0 && x < 100 ? americanOf(x) : NaN) : x; };
+const typedOddsRaw = (v) => { const x = parseFloat(v); return isNaN(x) ? NaN : isPercent(x) ? americanOf(x) : inCents() ? NaN : x; };
 /* A price as it goes in a box: American odds, or cents to one decimal. */
 const boxPrice = (a) => (a == null || a === "" || isNaN(a) ? "" : inCents() ? String(Math.round(centsOf(a) * 10) / 10) : String(Math.round(a)));
 /* What was typed where a price goes -> American odds. In cents the fee is added first, so what comes out is
@@ -74,8 +79,8 @@ const boxPrice = (a) => (a == null || a === "" || isNaN(a) ? "" : inCents() ? St
 function typedOdds(v) {
   const x = parseFloat(v);
   if (isNaN(x)) return NaN;
-  if (!inCents()) return x > -100 && x < 100 ? NaN : x;
-  if (x <= 0 || x >= 100) return NaN;
+  if (!inCents()) return isPercent(x) ? americanOf(x) : x > -100 && x < 100 ? NaN : x;
+  if (!isPercent(x)) return NaN;
   return americanOf(Math.min(x + feeOf(x), 99.9));
 }
 /* The most a contract is worth paying for a pick with this chance of winning, once the fee is counted. */
@@ -136,6 +141,20 @@ function ratingOf(l) {
 const chip = (kind) => `<span class="rate r-${kind}" title="${esc(RATINGS[kind][1])}">${RATINGS[kind][0]}</span>`;
 const sportsShown = () => (S.slate ? S.slate.sports.filter((s) => S.sport === "all" || s.sport === S.sport) : []);
 const inSlip = (k) => S.slip.includes(k);
+/* Player props the user marked as not on their app: a whole stat ("Pass Att", overs and unders), one side of it
+   ("Threes unders"), or one player's. The feed is a sportsbook's menu; an app can offer less of it. They stay
+   out of every suggestion. */
+const ruleIds = (l) => { const m = `${String(l.sport).toUpperCase()}|${l.market_key}|`; return [`${m}|`, `${m}${l.side}|`, `${m}${l.side}|${l.player_key}`]; };
+const notOffered = (l) => { const R = (S.slate && S.slate.not_offered) || []; return !!(l && l.player_key && R.length && R.some((r) => ruleIds(l).includes(r.id))); };
+/* "N or more" bets ("4+ receptions"): each is the over on N - 0.5, held in the slip as that pick at that line. */
+const rungOn = (key, n) => inSlip(key) && !!S.legs[key] && Math.abs(parseFloat(S.slipLines[key] ?? S.legs[key].line) - (n - 0.5)) < 1e-9;
+/* A suggested pick by its key: one of the slate's, or an "N or more" pick. The second kind goes in the slip as
+   the over it belongs to (base_key) at its threshold, so it needs that over to be on the slate. */
+const pickOf = (k) => S.legs[k] || ((S.rungLegs || {})[k] && S.legs[S.rungLegs[k].base_key] ? S.rungLegs[k] : undefined);
+const pickIn = (l) => (l.rung != null && l.base_key ? rungOn(l.base_key, l.rung) : inSlip(l.key));
+const sideWord = (side, n = 1) => (side === "yes" ? (n > 1 ? "Yes bets" : "Yes") : `${side === "over" ? "over" : "under"}${n > 1 ? "s" : ""}`);
+const ruleLabel = (r) => (r.side === "plus" ? `${r.player ? `${r.player}: ` : ""}${r.market} “N or more” bets`
+  : r.player ? `${r.player}: ${r.market} ${sideWord(r.side)}` : r.side ? `${r.market} ${sideWord(r.side, 2)}` : `${r.market}: overs and unders`) + ` (${r.sport})`;
 const guideLink = (text = "What do these numbers mean?") => `<button class="linkish" data-act="guide">${text}</button>`;
 const pageHead = (title, desc) => `<div class="page-hd"><h1>${title}</h1><p>${desc}</p></div>`;
 
@@ -182,8 +201,13 @@ async function poll() {
       setTimeout(poll, 800);
       return;
     }
-    if (!S.slate || S.slate.run_at !== st.run_at || (prev && prev.status === "running")) await loadSlate();
-    else if (st.status === "error") renderMain();
+    if (!S.slate || S.slate.run_at !== st.run_at || (prev && prev.status === "running")) {
+      if (S.slate && typingNow()) { setTimeout(poll, 3000); return; }  // never redraw under someone typing
+      const auto = S.autoUpdate;
+      S.autoUpdate = false;
+      await loadSlate();
+      if (auto) toast("Updated with the latest lines");
+    } else if (st.status === "error") renderMain();
   } catch (e) {
     S.status = { status: "offline", log: [String(e.message || e)] };
     renderStatus();
@@ -198,6 +222,7 @@ async function loadSlate() {
   for (const g of S.started) for (const l of g.legs) S.legs[l.key] = l;  // a game that has started: its last numbers
   const P = S.slate.plays || { games: [], groups: [], days: [], lean_legs: [] };
   for (const l of P.lean_legs || []) S.legs[l.key] = l;  // props without a price, at an assumed one
+  S.rungLegs = Object.fromEntries((P.rung_legs || []).map((l) => [l.key, l]));  // suggested "N or more" picks
   for (const s of S.slate.sports) for (const l of s.legs) S.legs[l.key] = l;  // a priced pick wins a shared key
   S.plays = { ...P, byGame: Object.fromEntries((P.games || []).map((g) => [`${g.sport}|${g.game_id}`, g])) };
   const before = S.slip.length;
@@ -227,7 +252,14 @@ async function loadTrack() {
   if (S.page === "track") renderMain();
 }
 
-function saveSlip() { localStorage.setItem("slip", JSON.stringify(S.slip)); }
+function saveSlip() {
+  // a line or an "N or more" choice belongs to a pick in the slip: it goes when the pick goes
+  for (const k of Object.keys(S.slipLines)) if (!S.slip.includes(k)) delete S.slipLines[k];
+  for (const k of Object.keys(S.slipRung)) if (!S.slip.includes(k) || S.slipLines[k] == null || Math.abs(parseFloat(S.slipLines[k]) - (S.slipRung[k] - 0.5)) > 1e-9) delete S.slipRung[k];
+  localStorage.setItem("slip", JSON.stringify(S.slip));
+  localStorage.setItem("slip_lines", JSON.stringify(S.slipLines));
+  localStorage.setItem("slip_rungs", JSON.stringify(S.slipRung));
+}
 
 /* The lines typed into the slip that differ from the tool's own: pick key -> line. */
 function slipLinesNow() {
@@ -242,8 +274,17 @@ async function evalSlip() {
   } catch (_) { S.slipEval = null; }
   const start = S.keepOdds != null ? S.keepOdds : S.slipEval && S.slipEval.odds != null ? S.slipEval.odds : null;
   S.slipOdds = start == null ? null : boxPrice(start);
+  if (S.keepOdds == null && S.slip.some(slipNoPrice)) S.slipOdds = "";
   S.slipOddsTyped = S.keepOdds != null;  // a price that came from the user's own slip counts as theirs
   S.keepOdds = null;
+}
+
+/* A pick in the slip the tool has no price for: a touchdown scorer, or an "N or more" bet the feed does not
+   price. The price box then starts empty instead of at a number that belongs to another bet. */
+function slipNoPrice(k) {
+  const l = S.legs[k], alt = ((S.slipEval && S.slipEval.alts) || {})[k];
+  if (!l) return false;
+  return !!l.sim_only || (S.slipRung[k] != null && slipLinesNow()[k] != null && !(alt && alt.own_price));
 }
 
 /* The box for pasting a bet slip, and what was found in the last one pasted. */
@@ -277,6 +318,20 @@ function importNote() {
   return `<div class="imp-note ${n.n && !miss ? "" : "warn"}">${head}${miss ? `<div style="margin-top:4px">Not matched:</div><ul>${miss}</ul>` : ""}
     ${n.odds == null && n.n ? `<div style="margin-top:4px">No odds found in the text: type them below.</div>` : ""}</div>`;
 }
+
+const typingNow = () => { const a = document.activeElement; return !!a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName); };
+
+/* The server updates by itself when the feed moves (a game line, or a player prop). A page left open picks
+   that up within a minute, and straight away when it is shown again, without a reload. */
+async function checkForUpdate() {
+  if (document.hidden || !S.slate || !S.status || S.status.status === "running" || typingNow()) return;
+  try {
+    const st = await api("/api/status");
+    if (st.status === "running" || (st.run_at && st.run_at !== S.slate.run_at)) { S.autoUpdate = true; poll(); }
+  } catch (e) { /* the next check tries again */ }
+}
+setInterval(checkForUpdate, 60000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) checkForUpdate(); });
 
 // ============================================================================ header / status
 function renderStatus() {
@@ -496,19 +551,20 @@ function leanChip(l) {
 }
 /* One suggested pick inside a game: what it is, its chance, its price, and a button to add it. */
 function topPick(l) {
-  const on = inSlip(l.key);
+  const on = pickIn(l);
+  const add = l.rung != null && l.base_key ? `data-act="rung" data-key="${esc(l.base_key)}" data-n="${l.rung}"` : `data-act="toggle" data-key="${esc(l.key)}"`;
   const price = l.assumed ? `<span class="muted" title="The feed has no price for this prop. ${assumedOdds()} is a typical price, used until you type the real one from your slip.">no price in the feed</span>`
     : `<span>${fmtOdds(l.odds)}</span><span class="muted">return <span class="${cls(l.ev)}">${spct(l.ev)}</span></span>`;
   const worth = inCents() ? `<span class="muted" title="The most a contract is worth paying on your app, after the fee">worth up to <b>${fmtCents(worthUpTo(l.p_cond))}</b></span>` : "";
-  return `<li class="tp-row"><button class="add ${on ? "on" : ""}" data-act="toggle" data-key="${esc(l.key)}" aria-label="${on ? "Remove" : "Add"} ${esc(l.selection)} ${on ? "from" : "to"} the bet slip" title="Add to bet slip">${on ? "✓" : "+"}</button>
+  return `<li class="tp-row"><button class="add ${on ? "on" : ""}" ${add} aria-label="${on ? "Remove" : "Add"} ${esc(l.selection)} ${on ? "from" : "to"} the bet slip" title="Add to bet slip">${on ? "✓" : "+"}</button>
     <div class="tp-main"><div class="pick">${esc(l.selection)}</div><div class="tp-sub">${l.assumed ? leanChip(l) : chip(ratingOf(l))}${price}${worth}</div></div>
     <div class="tp-chance" title="The tool's chance this pick wins">${pct(l.p_cond, 0)}<small>to win</small></div></li>`;
 }
 /* A suggested parlay. The payout is exact only when every pick has a real price and no two share a game. */
 function playCard(p) {
-  const legs = p.leg_keys.map((k) => S.legs[k]).filter(Boolean);
+  const legs = p.leg_keys.map(pickOf).filter(Boolean);
   if (legs.length < p.leg_keys.length) return "";
-  const all = legs.every((l) => inSlip(l.key));
+  const all = legs.every(pickIn);
   const why = [p.assumed ? `${p.assumed === p.n ? "these picks have" : `${p.assumed} of these picks ${p.assumed === 1 ? "has" : "have"}`} no price in the feed, so ${assumedOdds()} each is assumed` : "",
     p.same_game ? "picks from the same game get their own price from your sportsbook" : ""].filter(Boolean).join("; and ");
   return `<article class="plcard play t-${p.tier}">
@@ -524,15 +580,15 @@ function playCard(p) {
       <button class="btn small ${all ? "" : "primary"}" data-act="add-play" data-keys="${esc(JSON.stringify(p.leg_keys))}" ${all ? "disabled" : ""}>${all ? "In your slip" : "Add all to slip"}</button></article>`;
 }
 const playCards = (list) => { const h = (list || []).map(playCard).join(""); return h ? `<div class="plcards">${h}</div>` : ""; };
-const playsShown = (list) => (list || []).filter((p) => p.leg_keys.every((k) => S.legs[k] && (S.sport === "all" || S.legs[k].sport.toLowerCase() === S.sport)));
+const playsShown = (list) => (list || []).filter((p) => p.leg_keys.every((k) => pickOf(k) && (S.sport === "all" || pickOf(k).sport.toLowerCase() === S.sport)));
 const dayName = (date) => { const d = new Date(`${date}T12:00:00`); return d.toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" }); };
 
 /* A game's suggested picks, with its three parlays folded underneath. */
 function gamePlays(s, g) {
   const gp = S.plays && S.plays.byGame[`${s.sport}|${g.game_id}`];
-  const picks = gp ? gp.picks.map((k) => S.legs[k]).filter(Boolean) : [];
+  const picks = gp ? gp.picks.map(pickOf).filter(Boolean) : [];
   if (!picks.length) return "";
-  const pars = gp.parlays.filter((p) => p.leg_keys.every((k) => S.legs[k]));
+  const pars = gp.parlays.filter((p) => p.leg_keys.every(pickOf));
   const id = `${s.sport}|${g.game_id}`;
   return `<div class="tp"><div class="mini-lab">⭐ Top picks for this game <span class="muted">best return for the price first</span></div>
     <ul class="tp-list">${picks.map(topPick).join("")}</ul>
@@ -586,10 +642,11 @@ function pageSlate() {
   const gameLegs = legs.filter((l) => !isProp(l));
   const propLegs = legs.filter(isProp);
   const lineOnly = sports.reduce((n, s) => n + (s.prop_lines || []).length, 0);
-  const value = legs.filter(isValue).sort((a, b) => b.ev - a.ev);
-  const pool = S.likelyTab === "games" ? gameLegs : S.likelyTab === "props" ? propLegs : legs;
+  const offered = legs.filter((l) => !notOffered(l));  // a bet your app does not offer is not suggested
+  const value = offered.filter(isValue).sort((a, b) => b.ev - a.ev);
+  const pool = (S.likelyTab === "games" ? gameLegs : S.likelyTab === "props" ? propLegs : legs).filter((l) => !notOffered(l));
   const likely = pool.filter((l) => l.odds >= -400 && !l.flag).sort((a, b) => b.p_win - a.p_win).slice(0, 12);
-  const top = legs.filter((l) => l.odds >= -400 && !l.flag).sort((a, b) => b.p_win - a.p_win)[0];
+  const top = offered.filter((l) => l.odds >= -400 && !l.flag).sort((a, b) => b.p_win - a.p_win)[0];
   const nGames = sports.reduce((n, s) => n + s.games.length, 0);
   const both = S.sport === "all" && S.slate.sports.length > 1;
   const book = gameLegs[0]?.book || "the sportsbook";
@@ -723,7 +780,7 @@ function fixForm(g, s) {
   const open = S.fixOpen === `${s.sport}|${g.game_id}`;
   return `<details class="fix" data-fix="${s.sport}|${esc(g.game_id)}" ${open ? "open" : ""}>
     <summary>${g.edited ? "Change your corrected line" : "Different at your sportsbook? Correct the line"}</summary>
-    <p class="note">Type what your sportsbook shows now. The game is re-priced at those numbers, as if the feed had delivered them.${g.edited && g.feed_line ? ` The feed says: spread ${esc(g.home)} ${signed(g.feed_line.spread_home)}, total ${lineNum(g.feed_line.total)}.` : ""}</p>
+    <p class="note">Type what your ${inCents() ? "app" : "sportsbook"} shows now${inCents() ? ", prices as the percent it shows" : ": prices as American odds, or as the percent your app shows (52 for 52%)"}. The game is re-priced at those numbers, as if the feed had delivered them.${g.edited && g.feed_line ? ` The feed says: spread ${esc(g.home)} ${signed(g.feed_line.spread_home)}, total ${lineNum(g.feed_line.total)}.` : ""}</p>
     <div class="fix-grid" data-sport="${s.sport}" data-game="${esc(g.game_id)}">
       <span class="fl">Spread</span>${inp("spread_home", L.spread_home, `${esc(g.home)} line`, "0.5")}${inp("spread_home_odds", L.spread_home_odds, `${esc(g.home)} odds`)}${inp("spread_away_odds", L.spread_away_odds, `${esc(g.away)} odds`)}
       <span class="fl">Total</span>${inp("total", L.total, "Total", "0.5")}${inp("over_odds", L.over_odds, "Over odds")}${inp("under_odds", L.under_odds, "Under odds")}
@@ -766,14 +823,23 @@ function propRows(s) {
       mine: a.book === "manual" || a.book === "corrected", refLine: a.ref_line ?? null, book: a.book, flag: a.flag,
       gap: a.side === "yes" || simOver == null || fairOver == null ? null : (a.ref_line != null ? null : simOver - fairOver),
       best: Math.max(over ? over.p_cond : 0, under ? under.p_cond : 0), ev: Math.max(over ? over.ev : -9, under ? under.ev : -9),
-      value: ls.some(isValue) });
+      value: ls.some(isValue), ladder: (s.ladders || {})[a.group] || null });
   }
   for (const p of s.prop_lines || []) {
     if (have.has(`${p.player_key}|${p.market_key}`)) continue;
+    // a line without a price can still go in the bet slip: both sides exist as picks at an assumed price
+    const side = (x) => { const l = S.legs[`${s.sport.toUpperCase()}|${p.game_id}|${p.market_key}|${x}|${p.player_key}`]; return l && l.assumed ? l : null; };
     rows.push({ id: `${p.game_id}|${p.player_key}|${p.market_key}`, player: p.player, pkey: p.player_key, mkey: p.market_key, market: p.market, game: p.game, game_id: p.game_id, start: p.start,
-      line: p.line, proj: typical(p.line, p.proj, p.proj_med), over: null, under: null, yesOnly: false, priced: false, mine: false, book: p.book,
+      line: p.line, proj: typical(p.line, p.proj, p.proj_med), over: side("over"), under: side("under"), yesOnly: false, priced: false, mine: false, book: p.book,
       flag: Math.abs(p.p_over - 0.5) >= settings().prop_gap_flag ? "far" : "",
-      gap: p.p_over - 0.5, best: 0, ev: -9, value: false });
+      gap: p.p_over - 0.5, best: 0, ev: -9, value: false, ladder: (s.ladders || {})[`${p.game_id}|${p.player_key}|${p.market_key}`] || null });
+  }
+  // touchdown scorers the feed lists without a price: the simulator's own chance, with 2+ and 3+ beside it
+  for (const l of Object.values(S.legs)) {
+    if (!l.sim_only || l.side !== "yes" || String(l.sport).toLowerCase() !== s.sport || have.has(`${l.player_key}|${l.market_key}`)) continue;
+    rows.push({ id: l.group, player: l.subject, pkey: l.player_key, mkey: l.market_key, market: l.market, game: l.game, game_id: l.game_id, start: l.start,
+      line: null, proj: l.proj, over: l, under: null, yesOnly: true, priced: false, simOnly: true, mine: false, book: l.book, flag: "",
+      gap: null, best: l.p_cond, ev: -9, value: false, ladder: (s.ladders || {})[l.group] || null });
   }
   return rows;
 }
@@ -819,12 +885,35 @@ function propTags(r) {
 
 /* One prop line as a row: who or what, the line, Over and Under. `label` is the player (by stat) or the stat (by player). */
 function gpRow(r, label, s) {
-  const sub = leanText(r);  // the simulator's own number is on the ranked list and the projections table
-  const buttons = r.priced
+  const canAdd = r.priced || r.over || r.under;  // a line without a price is added at an assumed one
+  const enter = (cls, text) => `<button class="${cls}" data-act="price-row" data-sport="${s.sport}" data-player="${esc(r.player)}" data-market="${esc(r.mkey)}" data-line="${r.line}" title="This line came without a price. Enter the ${inCents() ? "price your app" : "odds your sportsbook"} shows to get an expected return.">${text}</button>`;
+  const sub = r.simOnly ? `<span class="lt" title="No sportsbook line or price exists in the feed to check a touchdown chance against, so this is the simulator's number on its own. Treat it as a rough guide.">simulator's own estimate</span>`
+    : leanText(r) + (canAdd && !r.priced ? ` ${enter("linkish", `Enter ${inCents() ? "price" : "odds"}`)}` : "");  // the simulator's own number is on the ranked list and the projections table
+  const buttons = canAdd
     ? `<div class="gp-o">${sideBtn(r.over, r.yesOnly ? "Yes" : "Over")}</div><div class="gp-u">${r.yesOnly ? "" : sideBtn(r.under, "Under")}</div>`
-    : `<div class="gp-o gp-two"><button class="btn small" data-act="price-row" data-sport="${s.sport}" data-player="${esc(r.player)}" data-market="${esc(r.mkey)}" data-line="${r.line}" title="This line came without a price. Enter the odds your sportsbook shows to get an expected return.">Enter odds</button></div>`;
+    : `<div class="gp-o gp-two">${enter("btn small", `Enter ${inCents() ? "price" : "odds"}`)}</div>`;
   return `<div class="gp-row"><div class="gp-who">${label} ${propTags(r)}<div class="sub2">${sub}</div></div>
-    <div class="gp-line">${r.yesOnly ? "" : `<b>${lineNum(r.line)}</b>`}</div>${buttons}</div>`;
+    <div class="gp-line">${r.yesOnly ? "" : `<b>${lineNum(r.line)}</b>`}</div>${buttons}${rungStrip(r)}</div>`;
+}
+
+/* The "N or more" bets on one player's stat, as chips: the threshold and the tool's chance of reaching it.
+   The six nearest an even chance show first; the rest open with "all". */
+function rungStrip(r) {
+  const base = r.over, list = (r.ladder || []).filter((t) => !r.yesOnly || t[0] >= 2);  // anytime (1+) is the Yes button itself
+  if (!base || !list.length) return "";
+  let shown = list;
+  if (!S.rungAll[r.id] && list.length > 6) {
+    const near = [...list].sort((a, b) => Math.abs(a[1] - 0.5) - Math.abs(b[1] - 0.5)).slice(0, 6);
+    shown = list.filter((t) => near.includes(t) || rungOn(base.key, t[0]));
+  }
+  const what = r.yesOnly ? "TDs" : r.market;
+  const chips = shown.map(([n, p, odds]) => {
+    const on = rungOn(base.key, n);
+    return `<button class="rung ${on ? "on" : ""}" data-act="rung" data-key="${esc(base.key)}" data-n="${n}" aria-label="${on ? "Remove" : "Add"} ${esc(r.player)} ${n}+ ${esc(what)}"
+      title="${esc(r.player)} ${n}+ ${esc(what)}: win chance ${pct(p)}.${odds != null ? ` The DraftKings sportsbook's price for it is ${fmtOdds(odds)}.` : ""}${r.simOnly ? " The simulator's own estimate: there is no line or price to check it against." : ""}">${n}+ <b>${pct(p, 0)}</b></button>`;
+  }).join("");
+  const more = list.length > 6 ? `<button class="rung more" data-act="rung-all" data-row="${esc(r.id)}">${S.rungAll[r.id] ? "fewer" : `all ${list.length}`}</button>` : "";
+  return `<div class="rungs"><span class="rl" title="Bets on reaching a number: 4+ means 4 or more. Your app may list these beside, or instead of, an over/under.">or more</span>${chips}${more}</div>`;
 }
 
 /* A game's player props. On the home page: the top few lines for one stat, with chips to switch stat.
@@ -861,7 +950,7 @@ function gameProps(s, g, { full = false } = {}) {
       <button class="linkish" data-act="game-props" data-sport="${s.sport}" data-game="${esc(g.game_id)}">All ${total} props for this game →</button></div>`;
   return `<div class="gp-wrap ${full ? "full" : ""}" data-gp="${esc(id)}" ${full ? 'data-full="1"' : ""}>
     ${full ? "" : head(`<span class="muted">${total} lines${s.prop_book ? ` · ${esc(s.prop_book)}` : ""}</span>`)}${chips}
-    <div class="gp-cols"><span>${esc(label(stat))}</span><span>Line</span><span>${mine.some((r) => r.priced) ? "Over" : ""}</span><span>${mine.some((r) => r.priced) ? "Under" : ""}</span></div>${body}${more}</div>`;
+    <div class="gp-cols"><span>${esc(label(stat))}</span><span>Line</span><span>${mine.some((r) => r.over || r.under) ? "Over" : ""}</span><span>${mine.some((r) => r.over || r.under) ? "Under" : ""}</span></div>${body}${more}</div>`;
 }
 
 function redrawGameProps(id) {
@@ -899,9 +988,14 @@ function propsByGame(s) {
 
 function sideBtn(l, label) {
   if (!l) return `<span class="muted">–</span>`;
-  const on = inSlip(l.key);
-  return `<button class="side-btn ${on ? "on" : ""} ${isValue(l) ? "val" : ""}" data-act="toggle" data-key="${esc(l.key)}" aria-label="${on ? "Remove" : "Add"} ${esc(l.selection)}"
-    title="${esc(l.selection)}: win chance ${pct(l.p_cond)} · book's chance ${pct(l.p_fair)} · expected return ${spct(l.ev)}">
+  const on = inSlip(l.key) && slipLinesNow()[l.key] == null;
+  // a line the feed gave no price for: the win chance is real, the price is yours to type in the bet slip
+  const off = notOffered(l), offNote = off ? " You marked this kind of bet as not on your app (change it in Guide and settings)." : "";
+  if (l.assumed) return `<button class="side-btn ${on ? "on" : ""} ${off ? "off" : ""}" data-act="toggle" data-key="${esc(l.key)}" aria-label="${on ? "Remove" : "Add"} ${esc(l.selection)}"
+    title="${esc(l.selection)}: win chance ${pct(l.p_cond)}.${offNote} The feed has no price for it, so ${fmtOdds(l.odds)} is assumed until you type the price your ${inCents() ? "app" : "sportsbook"} shows in the bet slip.">
+    <span class="s">${label}</span><span class="o np">no price</span><span class="p">${pct(l.p_cond, 0)}</span></button>`;
+  return `<button class="side-btn ${on ? "on" : ""} ${isValue(l) && !off ? "val" : ""} ${off ? "off" : ""}" data-act="toggle" data-key="${esc(l.key)}" aria-label="${on ? "Remove" : "Add"} ${esc(l.selection)}"
+    title="${esc(l.selection)}: win chance ${pct(l.p_cond)} · book's chance ${pct(l.p_fair)} · expected return ${spct(l.ev)}.${offNote}">
     <span class="s">${label}</span><span class="o">${fmtOdds(l.odds)}</span><span class="p">${pct(l.p_cond, 0)}</span></button>`;
 }
 
@@ -954,17 +1048,18 @@ function propBoard(s) {
 
   const body = rows.slice(0, S.pb.limit).map((r) => {
     const tags = [];
+    const enter = (cls) => `<button class="${cls}" data-act="price-row" data-player="${esc(r.player)}" data-market="${esc(r.mkey)}" data-line="${r.line}">Enter ${inCents() ? "price" : "odds"}</button>`;
     if (r.value) tags.push(chip("value"));
     if (r.flag) tags.push(chip("news"));
     else if (r.gap != null && Math.abs(r.gap) >= st.prop_lean) tags.push(`<span class="rate r-lean" title="The simulator disagrees with the ${r.priced ? "sportsbook" : "line"} by 15 points or more. See the test results above for how these have done.">💪 Strong lean</span>`);
     if (r.mine) tags.push(r.book === "corrected" ? `<span class="badge" title="You entered the sportsbook's current line">corrected by you</span>` : `<span class="badge" title="A line you entered from another sportsbook">your book</span>`);
     return `<tr>
-      <td><span class="pick">${esc(r.player)}</span> ${tags.join(" ")}<div class="sub2">${esc(r.game)} · ${when(r.start)}${r.refLine != null ? ` · DraftKings line ${lineNum(r.refLine)}` : ""}</div></td>
+      <td><span class="pick">${esc(r.player)}</span> ${tags.join(" ")}<div class="sub2">${esc(r.game)} · ${when(r.start)}${r.refLine != null ? ` · DraftKings line ${lineNum(r.refLine)}` : ""}${!r.priced && (r.over || r.under) ? ` · ${enter("linkish")}` : ""}</div></td>
       <td>${esc(r.market)}</td>
       <td class="num"><b>${r.yesOnly ? "–" : lineNum(r.line)}</b></td>
       <td class="num">${r.yesOnly ? "–" : num(r.proj, 1)}</td>
-      <td class="num">${r.priced ? sideBtn(r.over, r.yesOnly ? "Yes" : "Over") : ""}</td>
-      <td class="num">${r.priced ? (r.yesOnly ? `<span class="muted">–</span>` : sideBtn(r.under, "Under")) : `<button class="btn small" data-act="price-row" data-player="${esc(r.player)}" data-market="${esc(r.mkey)}" data-line="${r.line}">Enter odds</button>`}</td>
+      <td class="num">${r.priced || r.over || r.under ? sideBtn(r.over, r.yesOnly ? "Yes" : "Over") : ""}</td>
+      <td class="num">${r.priced || r.over || r.under ? (r.yesOnly ? `<span class="muted">–</span>` : sideBtn(r.under, "Under")) : enter("btn small")}</td>
       <td>${leanCell(r)}</td></tr>`;
   }).join("");
   const table = rows.length ? `<div class="tw"><table class="t board"><thead><tr><th>Player</th><th>Stat</th>
@@ -1017,7 +1112,7 @@ function trustCard(s) {
     text = `<b>What this means.</b> The free feed has ${SP} prop <i>lines</i> but not their prices, so nothing here is rated Value until you enter your sportsbook's odds.
       When the simulator disagreed strongly with the real DraftKings line, its side won ${pct(lean.won, 0)} of the time over the last ${c.days} weeks. That is encouraging, but it is not proof of profit:
       without the prices there is no telling how much of it the sportsbook had already charged for, especially on receptions and touchdowns, where one side often costs much more.
-      Use the “Biggest disagreements” view to find candidates, then click <b>Enter odds</b> to see the expected return at your book's price.`;
+      Use the “Biggest disagreements” view to find candidates. Press <b>Over</b> or <b>Under</b> on any line to put it in the bet slip, then type the price your ${inCents() ? "app" : "sportsbook"} shows there to see the expected return.`;
   }
   return `<section class="card"><div class="hd"><h2>How much to trust ${SP} prop picks</h2><span class="sub">the simulator was replayed on past games and compared with real sportsbook lines</span>
       <div class="right"><button class="linkish" data-act="nav" data-page="model">See the full test</button></div></div>
@@ -1051,13 +1146,13 @@ function pageProps() {
       <label class="player">Player<input type="text" list="players" data-bind="form.player" id="pf-player" value="${esc(S.form.player)}" placeholder="Start typing a name"></label>
       <label>Stat<select data-bind="form.market" id="pf-market">${markets.map(([k, l]) => `<option value="${k}" ${k === S.form.market ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></label>
       <label>Line<input type="number" step="0.5" data-bind="form.line" id="pf-line" value="${esc(S.form.line)}" placeholder="24.5"></label>
-      <label>${inCents() ? "Over (Yes) price ¢" : "Over odds"}<input type="number" step="${inCents() ? "0.1" : "1"}" data-bind="form.over" id="pf-over" value="${esc(S.form.over)}" placeholder="${inCents() ? "52" : "-110"}"></label>
-      <label>${inCents() ? "Under (No) price ¢" : "Under odds"}<input type="number" step="${inCents() ? "0.1" : "1"}" data-bind="form.under" value="${esc(S.form.under)}" placeholder="${inCents() ? "50" : "-110"}"></label>
+      <label>${inCents() ? "Over (Yes) price, % or ¢" : "Over odds or %"}<input type="number" step="${inCents() ? "0.1" : "1"}" inputmode="decimal" data-price="1" data-bind="form.over" id="pf-over" value="${esc(S.form.over)}" placeholder="${inCents() ? "52" : "-110 or 52"}"></label>
+      <label>${inCents() ? "Under (No) price, % or ¢" : "Under odds or %"}<input type="number" step="${inCents() ? "0.1" : "1"}" inputmode="decimal" data-price="1" data-bind="form.under" value="${esc(S.form.under)}" placeholder="${inCents() ? "50" : "-110 or 50"}"></label>
       <button class="btn primary" data-act="price-one">Price it</button>
     </div>
     <datalist id="players">${players.map((p) => `<option value="${esc(p)}">`).join("")}</datalist>
     <details style="margin-top:12px"><summary class="muted" style="cursor:pointer">Paste several lines at once</summary>
-      <p class="note">One per line: <code>player, stat, line, over odds, under odds</code>. Example: <code>${s.sport === "nba" ? "Nikola Jokic, Points, 27.5, -115, -105" : "Josh Allen, Pass Yds, 245.5, -110, -110"}</code></p>
+      <p class="note">One per line: <code>player, stat, line, over price, under price</code>. A price is American odds or the percent your app shows. Example: <code>${s.sport === "nba" ? "Nikola Jokic, Points, 27.5, 53, 49" : "Josh Allen, Pass Yds, 245.5, 52, 50"}</code></p>
       <textarea data-bind="form.paste" placeholder="player, stat, line, over odds, under odds">${esc(S.form.paste)}</textarea>
       <div style="margin-top:8px"><button class="btn" data-act="price-many">Price all</button></div></details>
     ${S.priceErrors.length ? `<div class="banner warn" style="margin:12px 0 0">${S.priceErrors.map(esc).join("<br>")}</div>` : ""}`;
@@ -1239,9 +1334,10 @@ function cashBox(b) {
     const cut = c.offer_share == null ? null : 1 - c.offer_share;
     res = `<div class="verdict-box ${kind}"><b>${esc(c.text)}</b></div>
       <div class="kvs">
-        <div class="kv"><span class="k">Worth right now <span class="muted">(what it pays × chance it wins)</span></span><span class="v">${money(c.fair, 2)}</span></div>
+        <div class="kv"><span class="k">If you hold</span><span class="v">${pct(1 - c.p_nothing, 0)} it pays ${money(c.payout, 2)} <span class="muted" style="font-weight:400">· ${pct(c.p_nothing, 0)} you get nothing</span></span></div>
+        <div class="kv"><span class="k">Average worth <span class="muted">(what it pays × chance it wins)</span></span><span class="v">${money(c.fair, 2)}</span></div>
         <div class="kv"><span class="k">The offer</span><span class="v">${money(c.offer, 2)} <span class="muted" style="font-weight:400">${c.offer_share == null ? "" : cut > 0 ? `· the sportsbook keeps ${pct(cut, 0)}` : `· ${pct(-cut, 0)} above its worth`}</span></span></div>
-        ${c.risk_value != null ? `<div class="kv" title="The sure amount that is exactly as good as holding this bet, given how large the swing is next to your bankroll. It uses the same risk setting that sizes your stakes."><span class="k">Cash out at or above <span class="muted">(for your ${money(S.bankroll)} bankroll)</span></span><span class="v">${money(c.risk_value, 2)}</span></div>` : `<div class="kv"><span class="k muted">Set your bankroll at the top to allow for risk</span><span class="v"></span></div>`}
+        ${c.risk_value != null ? `<div class="kv" title="The sure amount that is exactly as good as holding this bet once the chance of getting nothing is counted: the bigger the swing next to the bankroll, the lower it is. It uses the same risk setting that sizes your stakes."><span class="k">Cash out at or above <span class="muted">${c.bankroll_assumed ? `(taking this stake as 3% of a ${money(c.bankroll)} bankroll: set yours at the top)` : `(for your ${money(c.bankroll)} bankroll)`}</span></span><span class="v">${money(c.risk_value, 2)}</span></div>` : ""}
         <div class="kv" title="If the true chance of winning is below this, the offer is the better deal"><span class="k">The offer is the better deal only if the chance is below</span><span class="v">${pct(c.breakeven_p, 0)} <span class="muted" style="font-weight:400">· estimate now ${pct(c.p, 0)}</span></span></div>
       </div>`;
   }
@@ -1280,7 +1376,7 @@ function hedgeBox(b) {
     <p class="note" style="margin:0 0 8px">One pick is left. Betting the other side now, <b>${h ? esc(h.selection) : `against ${esc(leg.selection)}`}</b>, locks in the same result whichever way it goes.
       ${h ? `The feed shows ${fmtOdds(h.odds)} for it (${esc(h.book)}). Live prices move every few seconds, so` : "The feed has no live price for it, so"} type the odds on your sportsbook.
       This is often a better deal than the cash-out button.</p>
-    <label class="cash-in">Live ${inCents() ? "price for the other side, in cents" : "odds for the other side"}<input class="offer" type="number" step="${inCents() ? "0.1" : "1"}" inputmode="decimal" data-hedge="${esc(b.id)}" value="${esc(S.hedgeOdds[b.id] ?? (h ? boxPrice(h.odds) : ""))}" placeholder="${inCents() ? "52" : "-110"}"></label>
+    <label class="cash-in">Live ${inCents() ? "price for the other side (the % or ¢ in your app)" : "odds for the other side, or the % your app shows"}<input class="offer" type="number" step="${inCents() ? "0.1" : "1"}" inputmode="decimal" data-price="1" data-hedge="${esc(b.id)}" value="${esc(S.hedgeOdds[b.id] ?? (h ? boxPrice(h.odds) : ""))}" placeholder="${inCents() ? "52" : "-110"}"></label>
     <div id="hedge-${esc(b.id)}">${hedgeCalc(b)}</div></div>`;
 }
 
@@ -1381,6 +1477,44 @@ function exposure(open) {
       <p class="note" style="margin:10px 0 0">A parlay counts in full for every game it still needs, since any one of them can lose it. So these can add up to more than you have staked.</p></div></section>`;
 }
 
+/* Money won or lost, with its sign: +$15.00, −$10.00, $0.00. */
+const gain = (x) => (x == null || isNaN(x) ? "–" : `${x > 0.004 ? "+" : ""}${money(Math.abs(x) < 0.005 ? 0 : x, 2)}`);
+const nBets = (n) => `${n} bet${n === 1 ? "" : "s"}`;
+
+/* Everything the bets on this page can still pay, together. A win is banked and a loss comes off the total, so
+   the number moves as results come in. */
+function payoutCard() {
+  const B = S.live && S.live.board;
+  if (!B || !(B.n_won + B.n_alive + B.n_lost)) return "";
+  const all = B.won + B.alive + B.lost, w = (x) => (all > 0 ? Math.max((100 * x) / all, x > 0 ? 2 : 0) : 0);
+  const head = B.n_alive ? `if ${B.n_alive === 1 ? "the one bet" : `all ${B.n_alive} bets`} still alive win${B.n_alive === 1 ? "s" : ""}${B.n_won ? `, with ${money(B.won, 2)} already won` : ""}`
+    : B.n_won ? "won: every bet here is settled" : "every bet here has lost";
+  return `<section class="hero pay" aria-label="Total payout">
+    <div class="pay-lab">💰 Total payout</div>
+    <div class="pay-big">${money(B.possible, 2)}</div>
+    <p>${head}. ${money(B.staked, 2)} staked on ${nBets(B.n_won + B.n_alive + B.n_lost)}.</p>
+    <div class="pay-bar" role="img" aria-label="Won ${money(B.won, 2)}, still to play for ${money(B.alive, 2)}, can no longer pay ${money(B.lost, 2)}">
+      <span class="won" style="width:${w(B.won)}%"></span><span class="alive" style="width:${w(B.alive)}%"></span><span class="gone" style="width:${w(B.lost)}%"></span></div>
+    <div class="pstats">
+      <div class="pstat"><span class="pk"><i class="dot won"></i>Won so far</span><span class="pv">${money(B.won, 2)}</span><span class="pd">${B.n_won ? nBets(B.n_won) : "nothing settled as a win yet"}</span></div>
+      <div class="pstat"><span class="pk"><i class="dot alive"></i>Still to play for</span><span class="pv">${money(B.alive, 2)}</span><span class="pd">${B.n_alive ? `${nBets(B.n_alive)}${B.n_live ? `, ${B.n_live} in play` : ""}` : "no bet still alive"}</span></div>
+      <div class="pstat"><span class="pk"><i class="dot gone"></i>Can no longer pay</span><span class="pv">${money(B.lost, 2)}</span><span class="pd">${B.n_lost ? `${nBets(B.n_lost)} lost, ${money(B.lost_stake, 2)} staked` : "no bet lost"}</span></div>
+    </div>
+    ${B.n_alive ? `<p class="pay-foot">On average the bets still alive are worth about <b>${money(B.expected - B.won, 2)}</b> right now, at the tool's live estimates. The total above needs every one of them to win.</p>` : ""}</section>`;
+}
+
+/* Profit or loss on settled bets: today, this week, this month, this year. */
+function earningsCard() {
+  const E = (S.live && S.live.earnings) || [];
+  if (!E.length) return "";
+  const note = { day: "bets decided by today's games", week: "since Monday", month: "since the 1st", year: "since January 1" };
+  return `<section class="card earn"><div class="hd"><h2>📈 Earnings</h2><span class="sub">profit or loss on settled bets: what came back, minus what was staked</span></div>
+    <div class="bd"><div class="tiles earn-tiles">${E.map((e) => `<div class="tile" title="${esc(e.label)}: ${note[e.key] || ""}">
+      <div class="label">${esc(e.label)}</div><div class="value ${cls(e.pnl)}">${gain(e.pnl)}</div>
+      <div class="delta">${e.n ? `${nBets(e.n)} settled · ${e.won} won, ${e.lost} lost · ${money(e.staked, 2)} staked` : "nothing settled yet"}</div></div>`).join("")}</div>
+      <p class="note" style="margin:8px 0 0">A bet counts on the day of the game that decided it, as soon as the scores settle it. Bets still open are not in these numbers.</p></div></section>`;
+}
+
 function pageLive() {
   const head = pageHead("🔴 Live", "Your recorded bets as they stand right now, pick by pick, with real scores and stat lines, plus today's scoreboard with every player's stats. It checks for new numbers every 30 seconds while a game is on.");
   if (!S.live && !S.liveErr) return `${head}<div class="empty"><span class="spinner"></span>Checking the games ...</div>`;
@@ -1389,15 +1523,14 @@ function pageLive() {
   const bar = `<div class="filters"><span class="muted" style="font-size:12.5px">${S.liveErr ? `<span class="neg">Last check failed: ${esc(S.liveErr)}.</span> ` : ""}Last checked ${new Date(S.liveAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })} · ${S.live.in_play ? "games in play" : "no games in play"}</span>
     <span class="spacer"></span><button class="btn" data-act="live-refresh">Check now</button></div>`;
   if (!bets.length) {
-    return `${head}${bar}<section class="card"><div class="empty"><b>No open bets to follow.</b> After you place a bet at your sportsbook, add the same picks to the bet slip here, enter the odds and your stake, and click <i>Record bet</i>.
+    return `${head}${bar}${earningsCard()}<section class="card"><div class="empty"><b>No open bets to follow.</b> After you place a bet at your sportsbook, add the same picks to the bet slip here, enter the odds and your stake, and click <i>Record bet</i>.
       It then shows up on this page with live scores, and you can check any cash-out offer against it.
       ${S.started.length ? `<br><br><b>Already bet on a game that has started?</b> <button class="linkish" data-act="go-started" data-to="sec-started">Record it from the Started games list</button>.` : ""}</div></section>${scoreboard()}`;
   }
   const open = bets.filter((b) => b.open), done = bets.filter((b) => !b.open);
-  const atStake = open.reduce((n, b) => n + b.stake, 0), worth = open.reduce((n, b) => n + b.value, 0);
   return `${head}${bar}
-    ${open.length ? `<div class="tiles"><div class="tile"><div class="label">Open bets</div><div class="value">${open.length}</div><div class="delta">${money(atStake, 2)} staked</div></div>
-      <div class="tile"><div class="label">Worth right now</div><div class="value">${money(worth, 2)}</div><div class="delta">all open bets, at the tool's live estimates</div></div></div>` : ""}
+    ${payoutCard()}
+    ${earningsCard()}
     ${exposure(open)}
     <div class="banner"><span aria-hidden="true">ⓘ</span><span>Scores and stats are real. The <b>chance now</b> figures are rough estimates from the score, the clock and each player's pace: they do not know about foul trouble, injuries during the game or who has the ball. Use them as a guide, and check the final result on your sportsbook.</span></div>
     ${open.map(liveBet).join("")}
@@ -1731,7 +1864,16 @@ function settingsBlock() {
         <label>Plus this % of price × (1 − price)<input type="number" min="0" step="0.5" data-px="rate" value="${PX.rate || ""}" placeholder="0"></label></div>
       <p class="note" style="margin:8px 0 0" id="px-example">${feeExample()}</p>
       <p class="note" style="margin:6px 0 0">Set this from your app's fee page, or every return here will look better than it is. Apps charge in different ways: a flat amount per contract goes in the first box.
-        When this was written Kalshi published 7% × price × (1 − price), which is 7 in the second box. Check, because fees change.</p>` : ""}</div>`;
+        When this was written Kalshi published 7% × price × (1 − price), which is 7 in the second box. Check, because fees change.</p>` : ""}</div>
+    ${hiddenBlock()}`;
+}
+/* The bets marked as not on the user's app, each with a way back. */
+function hiddenBlock() {
+  const R = (S.slate && S.slate.not_offered) || [];
+  return `<div class="prefs"><h3 style="margin-top:0">Settings: bets your app does not offer</h3>
+    ${R.length ? `<ul class="hidden-list">${R.map((r) => `<li><span>${esc(ruleLabel(r))}</span><button class="btn small" data-act="offered-again" data-id="${esc(r.id)}">Suggest again</button></li>`).join("")}</ul>
+      <p class="note" style="margin:8px 0 0">These are left out of the suggested picks and parlays, and of the value and most-likely lists. They stay on the prop lists, greyed out.</p>`
+      : `<p class="note" style="margin:0">None yet. The tool's player props come from the DraftKings sportsbook, and your app may not offer all of them (an over/under on threes or on pass attempts, for example). When you cannot find one, add it to the bet slip and press <b>Not on your app?</b> there: the tool then stops suggesting bets like it.</p>`}</div>`;
 }
 function renderGuide() {
   const d = $("#guide");
@@ -1769,7 +1911,9 @@ function renderGuide() {
     </dl>
     <h3>During the games</h3>
     <p>The <b>Live</b> page follows every bet you recorded, pick by pick, with real scores and stat lines. If your sportsbook offers a cash-out, type the amount in and the tool compares it with what the bet is worth right now:
-      what it would pay, times the chance the remaining picks win. Sportsbooks usually offer less than that. Cashing out can still make sense when the possible win is large next to your bankroll, and the page tells you the amount at which it does.</p>
+      what it would pay, times the chance the remaining picks win. It also counts the chance of ending up with nothing: holding is a gamble and the offer is sure money,
+      so the verdict compares the offer with the sure amount that is as good as holding for your bankroll (with no bankroll set, it takes the bet's stake as 3% of one). The bigger the possible win next to your bankroll, the sooner cashing out makes sense, and the page tells you the amount at which it does.
+      During a game the chance is the tool's rough live estimate, corrected by how those estimates have done on finished games so far.</p>
     <h3>Trading apps (prices in cents)</h3>
     <p>A trading app sells a contract that pays $1 if you are right, for a price in cents, and charges a fee. Switch the tool to <b>cents per contract</b> above (or with the −110 / 52¢ switch at the top) and set the fee.
       Some apps, DraftKings' trade slip among them, write that price as a percent: 52% there is 52¢ here. The tool keeps ¢ for prices so they are not mistaken for its own win chances.
@@ -1784,6 +1928,9 @@ function renderGuide() {
     <h3>A different line on your app</h3>
     <p>Every pick in the bet slip has a <b>Your line</b> box. If your app or sportsbook has the pick at another line, type it and the pick is priced there: its win chance at your line, and in cents the most it is worth paying.
       It works for spreads, totals and player props on games still to come. A game that has started cannot be priced at another line, only recorded at it.</p>
+    <p><b>"Or more" bets.</b> Under each player's line is a row of chips such as <b>3+ 68%</b>, <b>4+ 49%</b>: the bets on reaching a number, with the tool's chance for each. Press one to put it in the bet slip. 4+ receptions is the same bet as over 3.5, so it is priced the same way: anchored to that player's main line, and for the NBA to the sportsbook's own price for that number. <b>Touchdown scorers</b> are under the Anytime TD tab of an NFL game. The feed has no line or price for them, so that chance is the simulator's own estimate and the tool never rates or suggests it.
+      The suggested picks and parlays use “or more” bets too: any the sportsbook prices (NBA), judged at that price like every other pick, and for a stat you have marked as having no over/under on your app, the “or more” bet that is the same bet as its over.</p>
+    <p>The tool's lines come from ESPN's copy of DraftKings, which can run behind the app itself. If a player prop shows a different line in your app, type it in the slip and press <b>Use … everywhere</b>: every pick, suggested parlay and price on the dashboard is then worked out at your line, until the feed itself moves or the game starts. The dashboard also updates by itself whenever the feed moves a game line or a player prop, and a page left open picks that up within a minute.</p>
     <h3>Pasting a bet slip</h3>
     <p><b>Paste a slip</b>, at the top of the bet slip, reads a bet you copied as text from your sportsbook: it finds the picks, the odds and the stake and fills the slip in.
       Anything it cannot match to a pick the tool knows is listed, not guessed. Check each pick and its line, then record it. A screenshot cannot be read, only text.</p>
@@ -2081,18 +2228,41 @@ function renderSlip() {
       Add two or more to price a parlay. Already placed a bet? Use <b>Paste a slip</b> to fill this in from your sportsbook's text. Nothing is placed for you: this only does the maths.</div>`;
     return;
   }
-  const alts = (S.slipEval && S.slipEval.alts) || {};
+  const alts = (S.slipEval && S.slipEval.alts) || {}, liveNow = (S.slipEval && S.slipEval.live) || {};
   html += `<div class="items">${legs.map((l) => {
-    const alt = alts[l.key], mine = slipLinesNow()[l.key];
+    const alt = alts[l.key], mine = slipLinesNow()[l.key], lv = liveNow[l.key];
+    const chanceText = lv ? `chance now <b>${pct(lv.p_now, 0)}</b>${lv.score ? ` (${esc(lv.score)})` : ""}, ${pct(l.p_cond, 0)} before the game`
+      : `win chance ${l.started ? "before the game " : ""}${pct(alt && alt.priced && mine != null ? alt.p_cond : l.p_cond, 0)}`;
     // a pick taken at another line: priced there if its game is still to come, otherwise only renamed
-    const where = mine == null ? "" : alt && alt.priced ? `<span class="sline-note ok">priced at your line: <b>${esc(alt.selection)}</b>, win chance <b>${pct(alt.p_cond, 0)}</b>${inCents() ? `, worth up to <b>${fmtCents(worthUpTo(alt.p_cond))}</b>` : ""}. The tool's own line is ${lineNum(l.line)}.</span>`
+    const rung = mine != null && S.slipRung[l.key] != null ? S.slipRung[l.key] : null, yes = l.side === "yes";
+    const altName = !(alt && alt.priced && mine != null) ? l.selection : rung != null && !yes ? `${l.subject} ${rung}+ ${l.market}` : alt.selection;
+    const where = mine == null ? "" : alt && alt.priced ? (rung != null
+        ? `<span class="sline-note ok">${yes ? "" : `${rung} or more is the over on ${lineNum(mine)}. `}Win chance <b>${pct(alt.p_cond, 0)}</b>${inCents() ? `, worth up to <b>${fmtCents(worthUpTo(alt.p_cond))}</b>` : ""}.${l.sim_only ? " The simulator's own estimate: no line or price exists to check it against." : ""}</span>`
+        : `<span class="sline-note ok">priced at your line: <b>${esc(alt.selection)}</b>, win chance <b>${pct(alt.p_cond, 0)}</b>${inCents() ? `, worth up to <b>${fmtCents(worthUpTo(alt.p_cond))}</b>` : ""}. The tool's own line is ${lineNum(l.line)}.</span>`)
       : `<span class="sline-note">the tool has ${lineNum(l.line)}${l.started ? " and cannot price a game that has started at another line" : ""}: the chance shown is for that line</span>`;
-    return `<div class="item"><div class="sel">${esc(alt && alt.priced && mine != null ? alt.selection : l.selection)}</div>
+    // a player prop the feed is behind on: the line typed can replace the feed's everywhere, not just in this slip
+    const book = inCents() ? "your app" : "your sportsbook";
+    const fix = mine != null && rung == null && l.player_key && !l.started ? `<div class="sline-fix"><span>Has ${book} moved its line to ${lineNum(mine)}? The feed can run behind.</span>
+        <button class="btn small" data-act="prop-fix" data-key="${esc(l.key)}" data-line="${mine}" title="The feed is behind ${book}. Every pick, suggested parlay and price on the dashboard is worked out at ${lineNum(mine)} instead, until the feed itself moves or the game starts.">Use ${lineNum(mine)} everywhere</button></div>`
+      : l.corrected && mine == null ? `<div class="sline-fix"><span>Corrected by you: the feed still says ${lineNum(l.feed_line)}. The tool goes back to the feed once it moves.</span>
+        <button class="btn small ghost" data-act="prop-fix-reset" data-key="${esc(l.key)}">Use the feed's ${lineNum(l.feed_line)}</button></div>` : "";
+    return `<div class="item"><div class="sel">${esc(altName)}</div>
       <button class="x" data-act="toggle" data-key="${esc(l.key)}" aria-label="Remove ${esc(l.selection)}">×</button>
-      <div class="meta">${esc(l.game)} · ${l.started ? `started · last price ${fmtOdds(l.odds)}` : l.assumed ? `no price in the feed (${fmtOdds(l.odds)} assumed)` : `${fmtOdds(l.odds)}${mine != null ? " at the tool's line" : ""}`} · win chance ${l.started ? "before the game " : ""}${pct(alt && alt.priced && mine != null ? alt.p_cond : l.p_cond, 0)}</div>
-      ${l.line != null ? `<label class="sline" title="If your app or sportsbook has this pick at a different line, type it: the pick is priced at your line.">Your line <input type="number" step="0.5" data-line-key="${esc(l.key)}" value="${esc(S.slipLines[l.key] ?? l.line)}" aria-label="The line you are betting for ${esc(l.selection)}"></label>${where}` : ""}</div>`;
+      <div class="meta">${esc(l.game)} · ${l.started ? `started · last price ${fmtOdds(l.odds)}` : l.sim_only ? "no price in the feed: type the one your app shows below" : l.assumed ? `no price ${l.corrected ? "for your corrected line" : "in the feed"} (${fmtOdds(l.odds)} assumed)` : alt && alt.own_price && mine != null ? `${fmtOdds(alt.odds)} at the DraftKings sportsbook` : `${fmtOdds(l.odds)}${mine != null ? " at the tool's line" : ""}`} · ${chanceText}</div>
+      ${l.line != null && yes ? where : ""}
+      ${l.line != null && !yes ? `<label class="sline" title="If your app or sportsbook has this pick at a different line, type it: the pick is priced at your line.">Your line <input type="number" step="0.5" data-line-key="${esc(l.key)}" value="${esc(S.slipLines[l.key] ?? l.line)}" aria-label="The line you are betting for ${esc(l.selection)}"></label>${where}${fix}` : ""}
+      ${l.player_key ? `<details class="nooffer"><summary>Not on ${book}?</summary>
+        <p>The tool lists what the regular DraftKings sportsbook offers, and ${book} may not have every one of those bets. Hide what it lacks and the tool stops suggesting it.</p>
+        <div class="nooffer-act">${rung != null && !yes
+          ? `<button class="btn small" data-act="not-offered" data-key="${esc(l.key)}" data-scope="side" data-rung="1">Hide all ${esc(l.market)} “N or more” bets</button>
+          <button class="btn small ghost" data-act="not-offered" data-key="${esc(l.key)}" data-scope="player" data-rung="1">Only ${esc(l.subject)}'s</button>`
+          : `<button class="btn small" data-act="not-offered" data-key="${esc(l.key)}" data-scope="stat">Hide all ${esc(l.market)} ${yes ? "bets" : "overs and unders"}</button>
+          ${yes ? "" : `<button class="btn small ghost" data-act="not-offered" data-key="${esc(l.key)}" data-scope="side">Only the ${sideWord(l.side, 2)}</button>`}
+          <button class="btn small ghost" data-act="not-offered" data-key="${esc(l.key)}" data-scope="player">Only ${esc(l.subject)}'s</button>`}</div></details>` : ""}</div>`;
   }).join("")}</div>`;
-  const nAssumed = legs.filter((l) => l.assumed).length, nStarted = legs.filter((l) => l.started).length;
+  const nAssumed = legs.filter((l) => l.assumed && !l.sim_only).length, nStarted = legs.filter((l) => l.started).length;
+  const nSim = legs.filter((l) => l.sim_only).length;
+  const noStart = legs.some((l) => slipNoPrice(l.key));  // a touchdown, or an "N or more" pick the feed does not price
   const E = S.slipEval;
   if (E && E.n) {
     const conflicts = E.conflicts && E.conflicts.length;
@@ -2101,19 +2271,20 @@ function renderSlip() {
       <div class="kv"><span class="k">${legs.length > 1 ? `${inCents() ? "Combined price" : "Parlay odds"} (${nAssumed ? "estimate" : inCents() ? "from sportsbook odds" : "standard"})` : nAssumed ? `${priceWord()} (assumed)` : inCents() ? "Sportsbook price" : "Odds"}</span><span class="v">${fmtOdds(E.odds)}</span></div>
       <div class="kv"><span class="k">${legs.length > 1 ? "Chance every pick wins" : "Win chance"}</span><span class="v">${pct(E.p_win_all)}${E.p_hit - E.p_win_all > 0.005 ? ` <span class="muted" style="font-weight:400">+${pct(E.p_hit - E.p_win_all)} push</span>` : ""}</span></div>
       <div class="kv" title="${inCents() ? "Only buy for less than this" : "Only bet if your sportsbook pays more than this"}"><span class="k">Fair ${inCents() ? "price" : "odds"} (break-even)</span><span class="v">${fmtOdds(E.fair_odds)}</span></div>
-      ${Object.keys(slipLinesNow()).some((k) => alts[k] && alts[k].priced) ? `<div class="hint">A pick above is priced at <b>your line</b>, not the tool's. The ${inCents() ? "price" : "odds"} the tool shows belong to its own line, so type the ${inCents() ? "price or payout" : "odds"} your ${inCents() ? "app" : "sportsbook"} gives for yours.</div>` : ""}
-      ${nStarted ? `<div class="hint"><b>${nStarted === legs.length ? (legs.length === 1 ? "This game has" : "These games have") : `${nStarted} of these picks are from games that have`} started.</b> The odds and chances shown are the last ones before the start. Check each line matches the one you bet, type the odds from your slip, and record it: the Live page takes over from there.</div>` : ""}
+      ${Object.keys(slipLinesNow()).some((k) => alts[k] && alts[k].priced && S.slipRung[k] == null) ? `<div class="hint">A pick above is priced at <b>your line</b>, not the tool's. The ${inCents() ? "price" : "odds"} the tool shows belong to its own line, so type the ${inCents() ? "price or payout" : "odds"} your ${inCents() ? "app" : "sportsbook"} gives for yours.</div>` : ""}
+      ${nStarted ? `<div class="hint"><b>${nStarted === legs.length ? (legs.length === 1 ? "This game has" : "These games have") : `${nStarted} of these picks are from games that have`} started.</b> The odds shown are the last ones before the start. The chance for a game in play is the tool's live estimate from the score and clock, and that is what "chance every pick wins" and the recorded bet use. Check each line matches the one you bet, type the ${inCents() ? "price or payout" : "odds"} from your slip, and record it: the Live page takes over from there.</div>` : ""}
+      ${nSim ? `<div class="hint"><b>${nSim === 1 ? "A touchdown pick here has" : "The touchdown picks here have"} no price and no line in the feed.</b> The chance is the simulator's own estimate, with nothing from a sportsbook to check it against, so treat it as a rough guide. Type the price ${inCents() ? "your app" : "your sportsbook"} shows before trusting any return.</div>` : ""}
       ${nAssumed ? `<div class="hint"><b>${nAssumed === legs.length ? (legs.length === 1 ? "This pick has" : "These picks have") : `${nAssumed} of these picks ${nAssumed === 1 ? "has" : "have"}`} no price in the feed.</b> The odds shown assume ${assumedOdds()} for each, a typical price. Type the real odds from your sportsbook's slip below before trusting the return.</div>` : ""}
       ${E.same_game ? `<div class="hint">These picks are from the same game and win together ×${num(E.lift, 2)} as often as unrelated picks would. Your sportsbook prices same-game parlays itself, so type in the odds it offers.</div>` : ""}
-      <div class="row"><label>${inCents() ? "Price on your app, in cents" : "Odds on your sportsbook's slip"}<input type="number" step="${inCents() ? "0.1" : "1"}" id="slipOdds" value="${S.slipOdds ?? ""}" aria-describedby="slipOddsHelp"></label>
+      <div class="row"><label>${inCents() ? "Price on your app (% or ¢)" : "Odds on your sportsbook's slip, or %"}<input type="number" step="${inCents() ? "0.1" : "1"}" inputmode="decimal" data-price="1" id="slipOdds" value="${S.slipOdds ?? ""}" aria-describedby="slipOddsHelp"></label>
         <label>${inCents() ? "Spend $" : "Stake $"}<input type="number" min="0" step="1" id="slipStake" value="${S.slipStake ?? ""}" placeholder="0"></label></div>
       ${inCents() ? `<div class="row one"><label>Payout your trade slip shows for that spend $<input type="number" min="0" step="1" id="slipPayout" value="${esc(S.slipPayout ?? "")}" placeholder="optional"></label></div>` : ""}
       <div class="hint" id="slipOddsHelp">${inCents()
-        ? `Type the price your app shows for ${legs.length > 1 ? "this combination" : "this contract"}: the percent on a trade slip, or cents (52 for 52% or 52¢). The box starts at ${fmtOdds(E.odds)}, what a sportsbook's odds for ${legs.length > 1 ? "these picks" : "it"} work out to.
+        ? `Type the price your app shows for ${legs.length > 1 ? "this combination" : "this contract"}: the percent on a trade slip, or cents (52 for 52% or 52¢). ${noStart ? "The box starts empty: the tool has no price of its own for this bet." : `The box starts at ${fmtOdds(E.odds)}, what a sportsbook's odds for ${legs.length > 1 ? "these picks" : "it"} work out to.`}
           <b>Better still, type the payout</b> your slip shows for your spend: that already has the fee in it, so the price box and the fee setting (${feeText()}) are then not used. <button class="linkish" data-act="guide">Fee setting</button>`
         : legs.length > 1
-          ? `Build this same parlay at your sportsbook and copy the odds it shows for the whole bet (for example +575). The box starts at ${fmtOdds(E.odds)}, the standard price worked out from the ${legs.length} picks' own odds.`
-          : `Copy the odds your sportsbook shows for this pick right now. The box starts at the odds the tool has.`} Also check that each line above matches your ${inCents() ? "app" : "sportsbook"}: the result is only as good as the lines.</div>
+          ? `Build this same parlay at your sportsbook and copy the odds it shows for the whole bet (for example +575). ${noStart ? "The box starts empty: the tool has no price of its own for one of these picks." : `The box starts at ${fmtOdds(E.odds)}, the standard price worked out from the ${legs.length} picks' own odds.`}`
+          : `Copy the odds your sportsbook shows for this pick right now. ${noStart ? "The box starts empty: the tool has no price of its own for it." : "The box starts at the odds the tool has."}`}${inCents() ? "" : " If your app shows a percent instead (52%), type that number: the tool then shows every price that way."} Also check that each line above matches your ${inCents() ? "app" : "sportsbook"}: the result is only as good as the lines.</div>
       <div id="slipCalc"></div>
       <button class="btn primary" data-act="record-bet" ${conflicts ? "disabled" : ""}>Record bet</button>
       <div class="hint">Saves it so the Live page can follow it during the games and Results can settle it afterwards. Place the actual bet at your sportsbook.</div>
@@ -2146,7 +2317,7 @@ function updateSlipCalc() {
   if (!box || !E) return;
   const sp = slipPrice();
   if (!sp) {
-    box.innerHTML = `<div class="hint">${inCents() ? "Enter the price in cents (a number between 1 and 99, for example 52 for 52¢ or 52%), or the payout your trade slip shows for your spend." : "Enter American odds: a number of 100 or more, with a minus sign for favourites (for example -110, or 250 for +250)."}</div>`;
+    box.innerHTML = `<div class="hint">${inCents() ? "Enter the price in cents (a number between 1 and 99, for example 52 for 52¢ or 52%), or the payout your trade slip shows for your spend." : "Enter American odds (for example -110, or 250 for +250), or the percent your app shows (52 for 52%)."}</div>`;
     return;
   }
   const dec = sp.dec, pw = E.p_win_all, ph = E.p_hit;
@@ -2164,7 +2335,12 @@ function updateSlipCalc() {
   const moved = slipLinesNow(), alts = E.alts || {};
   const offLine = legs.some((l) => l.started || (moved[l.key] != null && !(alts[l.key] && alts[l.key].priced)));
   if (offLine) {
-    box.innerHTML = `${html}<div class="hint">No verdict for this one: it has a game that has started${legs.some((l) => !l.started && moved[l.key] != null) ? ", or a line the tool could not price" : ""}, so the chance shown above is not the chance of this exact bet. It can still be recorded and followed.</div>`;
+    box.innerHTML = `${html}<div class="hint">No verdict for this one: ${legs.some((l) => l.started) ? "a game in play is only a rough live estimate, not good enough to call a price good or bad" : ""}${legs.some((l) => l.started) && legs.some((l) => !l.started && moved[l.key] != null) ? ", and " : ""}${legs.some((l) => !l.started && moved[l.key] != null) ? "a line the tool could not price means the chance above is not for this exact bet" : ""}. It can still be recorded and followed.</div>`;
+    return;
+  }
+  // a touchdown scorer: the chance is the simulator's alone, so it is shown as a break-even number, never as a verdict
+  if (legs.some((l) => l.sim_only)) {
+    box.innerHTML = `${html}<div class="hint">No verdict for this one: a touchdown chance is the simulator's own estimate, and the feed has no sportsbook line or price to check it against. By that estimate this bet wins <b>${pct(pw, pw < 0.1 ? 1 : 0)}</b> of the time, so it would have to ${inCents() ? `cost less than <b>${fmtCents(100 * pw)}</b>, fee included,` : `pay more than <b>${fmtOdds(E.fair_odds)}</b>`} to be worth it. A rough guide, not a recommendation.</div>`;
     return;
   }
   html += `<div class="kv"><span class="k">Expected return at ${inCents() ? "this price" : "these odds"}</span><span class="v ${cls(ev)}">${spct(ev)}${stake > 0 ? ` (${money(ev * (sp.spent || stake), 2)})` : ""}</span></div>`;
@@ -2174,15 +2350,26 @@ function updateSlipCalc() {
   box.innerHTML = html;
 }
 
+/* Every button for a pick shows whether it is in the slip: its own, and the "N or more" chips on its stat. */
+function syncPick(key) {
+  const own = inSlip(key) && slipLinesNow()[key] == null;
+  $$(`[data-act="toggle"][data-key="${CSS.escape(key)}"]`).forEach((b) => {
+    const on = b.classList.contains("side-btn") ? own : inSlip(key);
+    b.classList.toggle("on", on);
+    if (b.classList.contains("add")) b.textContent = on ? "✓" : "+";
+  });
+  $$(`[data-act="rung"][data-key="${CSS.escape(key)}"]`).forEach((b) => {
+    const on = rungOn(key, parseFloat(b.dataset.n));
+    b.classList.toggle("on", on);
+    if (b.classList.contains("add")) b.textContent = on ? "✓" : "+";
+  });
+}
+
 async function toggleLeg(key) {
   if (inSlip(key)) S.slip = S.slip.filter((k) => k !== key);
   else S.slip.push(key);
   saveSlip();
-  $$(`[data-act="toggle"][data-key="${CSS.escape(key)}"]`).forEach((b) => {
-    const on = inSlip(key);
-    b.classList.toggle("on", on);
-    if (b.classList.contains("add")) b.textContent = on ? "✓" : "+";
-  });
+  syncPick(key);
   S.slipStake = S.slipStake ?? null;
   await evalSlip();
   renderSlip();
@@ -2246,6 +2433,7 @@ document.addEventListener("click", async (e) => {
   if (act === "toggle") { e.preventDefault(); await toggleLeg(a.dataset.key); return; }
   if (act === "px-mode") {
     if (a.dataset.mode === PX.mode) return;
+    clearTimeout(window._pxs);  // a switch made by typing a percent is overtaken by this one
     const was = typedOddsRaw(S.slipOdds);
     PX.mode = a.dataset.mode;
     localStorage.setItem("px_mode", PX.mode);
@@ -2299,7 +2487,7 @@ document.addEventListener("click", async (e) => {
     return;
   }
   if (act === "import-singles-combo") { S.importSingles = null; renderSlip(); return; }
-  if (act === "clear-slip") { S.slipLines = {}; S.importNote = null; S.importSingles = null; S.slipPayout = ""; S.slip = []; saveSlip(); S.slipEval = null; renderSlip(); $$('[data-act="toggle"].on').forEach((b) => { b.classList.remove("on"); if (b.classList.contains("add")) b.textContent = "+"; }); return; }
+  if (act === "clear-slip") { S.slipLines = {}; S.importNote = null; S.importSingles = null; S.slipPayout = ""; S.slip = []; saveSlip(); S.slipEval = null; renderSlip(); $$('[data-act="toggle"].on').forEach((b) => { b.classList.remove("on"); if (b.classList.contains("add")) b.textContent = "+"; }); $$(".rung.on").forEach((b) => b.classList.remove("on")); return; }
   if (act === "ptab") { S.parlayTab = a.dataset.tab; renderMain(); return; }
   if (act === "ltab") { S.likelyTab = a.dataset.tab; renderMain(); return; }
   if (act === "pb-tab") { S.pb.tab = a.dataset.tab; S.pb.limit = 40; renderMain(); return; }
@@ -2307,9 +2495,19 @@ document.addEventListener("click", async (e) => {
   if (act === "add-play") {
     let keys = [];
     try { keys = JSON.parse(a.dataset.keys || "[]"); } catch (err) { keys = []; }
-    keys = keys.filter((k) => S.legs[k]);
+    const picks = keys.map(pickOf).filter(Boolean);
+    keys = picks.map((l) => l.key);
     if (!keys.length) return;
-    S.slip = [...new Set([...S.slip, ...keys])];
+    for (const l of picks) {
+      if (l.rung != null && l.base_key) {  // an "N or more" pick: its over, taken at the threshold
+        if (!inSlip(l.base_key)) S.slip.push(l.base_key);
+        S.slipLines[l.base_key] = String(l.rung - 0.5);
+        S.slipRung[l.base_key] = l.rung;
+      } else if (!inSlip(l.key)) {
+        S.slip.push(l.key);
+        delete S.slipLines[l.key];  // the suggestion is for the pick at its own line
+      }
+    }
     saveSlip(); await evalSlip(); renderSlip(); renderMain();
     toast(`${keys.length} picks added to the bet slip`);
     return;
@@ -2350,11 +2548,62 @@ document.addEventListener("click", async (e) => {
     } catch (err) { toast(String(err.message || err)); }
     return;
   }
+  if (act === "rung") {
+    const key = a.dataset.key, n = parseFloat(a.dataset.n), l = S.legs[key];
+    if (!l) return;
+    if (rungOn(key, n)) S.slip = S.slip.filter((k) => k !== key);
+    else {
+      if (!inSlip(key)) S.slip.push(key);
+      S.slipLines[key] = String(n - 0.5);
+      S.slipRung[key] = n;
+    }
+    saveSlip();
+    const typed = S.slipOddsTyped, kept = S.slipOdds;
+    await evalSlip();
+    if (typed) { S.slipOdds = kept; S.slipOddsTyped = true; }  // a price already typed stays; otherwise the box starts empty
+    syncPick(key);
+    renderSlip();
+    const w = document.documentElement.clientWidth;
+    if (w <= 1100 && w > 640 && S.slip.length) { $("#slip").classList.add("open"); $("#slipToggle").classList.remove("empty"); }
+    return;
+  }
+  if (act === "rung-all") {
+    S.rungAll[a.dataset.row] = !S.rungAll[a.dataset.row];
+    const w = a.closest(".gp-wrap");
+    if (w) redrawGameProps(w.dataset.gp);
+    return;
+  }
+  if (act === "not-offered" || act === "offered-again") {
+    const again = act === "offered-again", l = S.legs[a.dataset.key], scope = a.dataset.scope, plus = a.dataset.rung === "1";
+    a.disabled = true;
+    try {
+      const res = await api("/api/offered", { method: "POST", body: JSON.stringify(again ? { restore: a.dataset.id } : { key: a.dataset.key, scope, rung: plus }) });
+      S.slate.not_offered = res.not_offered;
+      if (!again) { S.slip = S.slip.filter((k) => (plus ? k !== a.dataset.key : !notOffered(S.legs[k]) || S.slipRung[k] != null)); saveSlip(); }
+      await loadSlate();  // the suggestions were rebuilt without them (or with them again)
+      if ($("#guide").open) renderGuide();
+      const what = plus ? `${scope === "player" ? `${l.subject}'s ` : ""}${l.market} “N or more” bets` : scope === "stat" ? `${l.market} ${l.side === "yes" ? "bets" : "overs and unders"}` : scope === "side" ? `${l.market} ${sideWord(l.side, 2)}` : `${l.subject}'s ${l.market} ${sideWord(l.side)}`;
+      toast(again ? "Back in the suggestions" : `${what} will not be suggested again. Undo it in Guide and settings.`);
+    } catch (err) { toast(String(err.message || err)); a.disabled = false; }
+    return;
+  }
+  if (act === "prop-fix" || act === "prop-fix-reset") {
+    const reset = act === "prop-fix-reset", key = a.dataset.key, line = parseFloat(a.dataset.line);
+    a.disabled = true;
+    try {
+      S.status = await api("/api/props/correct", { method: "POST", body: JSON.stringify(reset ? { key, reset: true } : { key, line }) });
+      if (reset) delete S.slipLines[key];  // back to the feed's line; a corrected one stays typed until the update lands on it
+      toast(reset ? "Going back to the feed's line: updating every pick (about 20 seconds)" : `Updating every pick at ${lineNum(line)} (about 20 seconds)`);
+      if (S.slate && S.slate.sports.length) $("#main").classList.add("dim");
+      poll();
+    } catch (err) { toast(String(err.message || err)); a.disabled = false; }
+    return;
+  }
   if (act === "fix-save" || act === "fix-reset") {
     const box = a.closest("details.fix"), grid = $(".fix-grid", box);
     const body = { sport: grid.dataset.sport, game_id: grid.dataset.game, reset: act === "fix-reset" };
     if (!body.reset) for (const i of $$("input", grid)) if (i.value !== "") body[i.name] = i.dataset.price ? typedOdds(i.value) : parseFloat(i.value);
-    if (!body.reset && Object.values(body).some((x) => typeof x === "number" && isNaN(x))) { toast(inCents() ? "Prices must be between 1 and 99 cents" : "Odds must be American odds, such as -110 or +120"); return; }
+    if (!body.reset && Object.values(body).some((x) => typeof x === "number" && isNaN(x))) { toast(inCents() ? "Prices must be between 1 and 99 (the percent or cents your app shows)" : "Type American odds such as -110 or +120, or the percent your app shows, such as 52"); return; }
     a.disabled = true;
     try {
       await api("/api/games/line", { method: "POST", body: JSON.stringify(body) });
@@ -2385,13 +2634,13 @@ document.addEventListener("click", async (e) => {
     const f = S.form;
     const line = parseFloat(f.line);
     if (!f.player || isNaN(line)) { S.priceErrors = ["Enter a player and a line."]; renderMain(); return; }
-    if (f.over === "" && f.under === "") { S.priceErrors = ["Enter the odds for at least one side (for example -110)."]; renderMain(); return; }
+    if (f.over === "" && f.under === "") { S.priceErrors = [inCents() ? "Enter the price for at least one side: the percent your app shows, for example 52." : "Enter the price for at least one side: odds such as -110, or the percent your app shows, such as 52."]; renderMain(); return; }
     await priceLines([{ sport: f.sport, player: f.player, market: f.market, line, over_odds: f.over === "" ? null : typedOdds(f.over), under_odds: f.under === "" ? null : typedOdds(f.under), same_book: f.from !== "other" }]);
     return;
   }
   if (act === "price-many") {
     const { lines, bad } = parsePaste(S.form.paste || "", S.form.sport);
-    if (!lines.length) { S.priceErrors = ["No valid lines found. Format: player, stat, line, over odds, under odds"]; renderMain(); return; }
+    if (!lines.length) { S.priceErrors = ["No valid lines found. Format: player, stat, line, over price, under price"]; renderMain(); return; }
     await priceLines(lines);
     if (bad.length) { S.priceErrors = S.priceErrors.concat(bad.map((b) => `Could not read: ${b}`)); renderMain(); }
   }
@@ -2435,10 +2684,43 @@ document.addEventListener("input", (e) => {
   }
 });
 
+/* A price written for cents: a percent or cents stays as it is, American odds are turned into cents. */
+function centsBox(v) {
+  const x = parseFloat(v);
+  return isNaN(x) || isPercent(x) || (x > -100 && x < 100) ? v : String(Math.round(centsOf(x) * 10) / 10);
+}
+
+/* A percent was typed where American odds were expected (DraftKings' trade slip shows prices that way). The
+   number is used as typed, and from now on this device shows every price the way the app does, in cents. */
+function pricesInCents(t) {
+  const grid = t.closest(".fix-grid");
+  const kept = grid ? [...$$("input", grid)].map((i) => [i.name, i.dataset.price ? centsBox(i.value) : i.value]) : [];
+  PX.mode = "cents";
+  localStorage.setItem("px_mode", PX.mode);
+  S.slipOdds = centsBox(S.slipOdds);
+  S.form.over = centsBox(S.form.over); S.form.under = centsBox(S.form.under);
+  for (const k of Object.keys(S.hedgeOdds)) S.hedgeOdds[k] = centsBox(S.hedgeOdds[k]);
+  syncPx();
+  updateSlipCalc();
+  toast("Prices now show in cents, the way your app shows them: 52% there is 52¢ here. To switch back, use the −110 / 52¢ choice in Guide and settings.");
+  // redraw a moment later, so a tap on the button beside the box still lands; then put back what was typed
+  clearTimeout(window._pxs);
+  window._pxs = setTimeout(() => {
+    renderMain(); renderSlip();
+    if ($("#guide").open) renderGuide();
+    if (grid) {
+      const again = $(`.fix-grid[data-sport="${grid.dataset.sport}"][data-game="${grid.dataset.game}"]`);
+      if (again) for (const [name, v] of kept) { const i = $(`input[name="${name}"]`, again); if (i) i.value = v; }
+    }
+  }, 400);
+}
+
 document.addEventListener("change", async (e) => {
   const t = e.target;
+  if (!inCents() && t.dataset.price && isPercent(parseFloat(t.value))) { pricesInCents(t); return; }
   if (t.dataset.lineKey) {
     S.slipLines[t.dataset.lineKey] = t.value;
+    saveSlip();
     const kept = S.slipOdds, typed = S.slipOddsTyped;
     await evalSlip();
     // A price the user typed stays. The tool's own price belongs to its own line, so once a pick is taken at

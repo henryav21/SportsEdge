@@ -180,3 +180,43 @@ class StartWithWindows(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RecordingABet(unittest.TestCase):
+    """A slip recorded with a game already in play, at a price of the bettor's own."""
+
+    def _legs(self):
+        now = pd.Timestamp.now(tz="UTC")
+        base = {"sport": "NBA", "date": "2026-11-24", "market_key": "ml", "player_key": "", "line": None, "p_push": 0.0,
+                "market": "Moneyline", "book": "DraftKings", "result": None}
+        coming = {**base, "key": "NBA|E1|ml|home|", "game_id": "E1", "home": "DEN", "away": "DAL", "side": "home", "dec": 1.3367,
+                  "odds": -297.0, "selection": "DEN ML", "subject": "DAL @ DEN", "p_win": 0.732, "p_cond": 0.732, "p_fair": 0.732,
+                  "start": (now + pd.Timedelta(hours=1)).isoformat(), "group": "E1|side"}
+        started = {**base, "key": "NBA|E2|ml|away|", "game_id": "E2", "home": "ORL", "away": "DET", "side": "away", "dec": 2.19,
+                   "odds": 119.0, "selection": "DET ML", "subject": "DET @ ORL", "p_win": 0.434, "p_cond": 0.434, "p_fair": 0.434,
+                   "start": (now - pd.Timedelta(hours=1)).isoformat(), "group": "E2|side", "started": True}
+        return [coming, started]
+
+    def test_a_game_in_play_counts_at_its_chance_now_and_the_value_at_the_price_paid(self):
+        from sportsedge import web
+
+        seen = {}
+
+        def fake_place(legs, odds, stake, p_hit, p_win_all, ev, note=""):
+            seen.update(legs=legs, p_win_all=p_win_all, ev=ev)
+            return {}
+
+        view = {"state": "in", "p_now": 0.8, "p_pre": 0.434, "p_push": 0.0, "score": "DET 60, ORL 45", "detail": "3rd 6:00",
+                "status": "live", "need": "ahead by 15"}
+        with mock.patch.object(web, "_picks", return_value=self._legs()), \
+                mock.patch.object(web.live, "leg_view", return_value=view) as lv, \
+                mock.patch.object(web.tracker, "place_bet", side_effect=fake_place), \
+                mock.patch.object(web, "_live_context", return_value=({}, {})):
+            web.api_place(web.BetReq(keys=["a", "b"], odds=100, stake=10))
+        self.assertEqual(lv.call_count, 1)                                # only the game that has started is looked up
+        self.assertAlmostEqual(seen["p_win_all"], 0.732 * 0.8)            # not 0.732 x 0.434
+        self.assertAlmostEqual(seen["ev"], 0.732 * 0.8 * 2.0 - 1)         # at the even money paid, not the picks' own odds
+        det = seen["legs"][1]
+        self.assertEqual((det["p_at_bet"], det["p_cond"]), (0.8, 0.434))  # the pre-game chance is kept for the Live page
+        self.assertEqual(det["score_at_bet"], "DET 60, ORL 45")
+        self.assertNotIn("p_at_bet", seen["legs"][0])

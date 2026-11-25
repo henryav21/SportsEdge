@@ -80,3 +80,50 @@ class History(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WaitsForFinalResults(unittest.TestCase):
+    """The NBA's game log lists games in progress: nothing may be settled from a score that is not final."""
+
+    def _res(self, wl_home, wl_away, pts=(8.0, 15.0)):
+        r = T.Resolver.__new__(T.Resolver)
+        r.nfl_sched = r.nfl_ps = r.nba_close = None
+        r._prop_close = {}
+        r.nba_team = pd.DataFrame([
+            {"GAME_ID": "1", "GAME_DATE": "2026-11-24", "TEAM_ABBREVIATION": "DEN", "MATCHUP": "DEN vs. DAL", "PTS": pts[0], "WL": wl_home},
+            {"GAME_ID": "1", "GAME_DATE": "2026-11-24", "TEAM_ABBREVIATION": "DAL", "MATCHUP": "DAL @ DEN", "PTS": pts[1], "WL": wl_away}])
+        r.nba_player = pd.DataFrame([
+            {"GAME_ID": "1", "GAME_DATE": "2026-11-24", "TEAM_ABBREVIATION": "DEN", "PLAYER_NAME": "Nikola Jokic", "pkey": "nikola jokic",
+             "PTS": 4.0, "REB": 3.0, "AST": 2.0, "FG3M": 0.0, "STL": 0.0, "BLK": 0.0, "WL": wl_home}])
+        return r
+
+    LEG = {"sport": "NBA", "game_id": "E1", "date": "2026-11-24", "home": "DEN", "away": "DAL", "market_key": "ml",
+           "side": "home", "player_key": "", "line": None, "dec": 1.34}
+
+    def test_a_game_in_progress_is_not_settled(self):
+        self.assertIsNone(self._res(None, None).game(self.LEG))
+        self.assertIsNone(self._res(np.nan, np.nan).game(self.LEG))
+        self.assertIsNone(self._res(None, None).settle(pd.Series(self.LEG)))
+
+    def test_a_finished_game_is(self):
+        self.assertEqual(self._res("L", "W", (101.0, 120.0)).game(self.LEG), (-19.0, 221.0))
+        self.assertEqual(self._res("L", "W", (101.0, 120.0)).settle(pd.Series(self.LEG))["status"], "lost")
+
+    def test_player_stats_wait_for_the_final_too(self):
+        prop = {**self.LEG, "market_key": "pts", "side": "over", "player_key": "nikola jokic", "line": 25.5}
+        self.assertIsNone(self._res(None, None).player_value(prop))
+        missing = {**prop, "player_key": "jamal murray"}  # not on the floor yet is not the same as not playing
+        self.assertIsNone(self._res(None, None).player_value(missing))
+        self.assertEqual(self._res("L", "W").player_value(missing), "void")
+        self.assertEqual(self._res("L", "W").player_value(prop), 4.0)
+
+    def test_a_combo_waits_three_hours_from_the_start(self):
+        class Lost:
+            def settle(self, leg):
+                return {"status": "lost"}
+        now = pd.Timestamp.now(tz="UTC")
+        early = [{**self.LEG, "start": (now - pd.Timedelta(hours=1)).isoformat()}]
+        later = [{**self.LEG, "start": (now - pd.Timedelta(hours=4)).isoformat()}]
+        self.assertIsNone(T._settle_combo(Lost(), early))
+        self.assertEqual(T._settle_combo(Lost(), later), ("lost", 0.0))
+        self.assertEqual(T._settle_combo(Lost(), [dict(self.LEG)]), ("lost", 0.0))  # no start time: as before

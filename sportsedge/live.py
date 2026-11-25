@@ -335,9 +335,13 @@ def prop_leg_chance(leg: dict, value: float, f: float, at: float | None = None) 
     mk, side, line = leg["market_key"], leg["side"], float(leg["line"])
     p_side = min(max(float(leg.get("p_cond") or 1.0 / float(leg.get("dec") or 2.0)), 0.02), 0.98)
     if mk == "anytime_td":
-        if value >= 1:
+        need = max(int(math.ceil(line)), 1)  # anytime is one touchdown; "2+ touchdowns" is the same pick at 1.5
+        if value >= need:
             return 1.0, 0.0
-        return 1.0 - math.exp(math.log(1.0 - p_side) * f), 0.0  # touchdowns arrive at the pre-game rate
+        if need == 1:
+            return 1.0 - math.exp(math.log(1.0 - p_side) * f), 0.0  # touchdowns arrive at the pre-game rate
+        rate = _solve(lambda x: _poisson_at_least(x, need), p_side, 1e-6, 12.0)  # the pre-game rate that chance implies
+        return _poisson_at_least(rate * f, need - int(value)), 0.0
     p_over_pre = p_side if side == "over" else 1.0 - p_side
     size = float(leg.get("proj") if leg.get("proj") is not None and not pd.isna(leg.get("proj")) else line)
     yards = mk not in COUNTS
@@ -597,6 +601,53 @@ def log_summary() -> dict:
             "since": str(g["ts"].min())}
 
 
+def live_slope() -> float:
+    """How far to trust a live chance, learned from the graded live log. 1 leaves it as it is; below 1 pulls it
+    toward 50-50 (on the log-odds scale), which is what is needed if it has been too sure of itself.
+
+    The fitted value only counts in proportion to the games behind it (in full from READY_GAMES on), so a
+    couple of nights move it a little and a season decides it. The log keeps the raw estimate, so this never
+    feeds on itself."""
+    path = _graded_path()
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return 1.0
+    hit = _cache.get("live_slope")
+    if hit and hit[0] == mtime:
+        return hit[1]
+    slope = 1.0
+    try:
+        g = pd.read_csv(path, dtype={"event_id": str, "key": str})
+        g = g[g["result"].isin(["won", "lost"])].dropna(subset=["p_tool"])
+        g = g[g["key"].str.split("|").str[3].isin(["over", "home"])]  # each market once
+        g = g[(g["p_tool"] > 0.03) & (g["p_tool"] < 0.97) & (g["left"] >= 0.08)].drop_duplicates(["key", "line"])
+        games = int(g["event_id"].nunique())
+        if len(g) >= 30 and games:
+            y = (g["result"] == "won").to_numpy(float)
+            p = g["p_tool"].clip(0.01, 0.99).to_numpy(float)
+            x = np.log(p / (1 - p))
+
+            def loss(a):
+                q = 1 / (1 + np.exp(-a * x))
+                return float(-(y * np.log(q) + (1 - y) * np.log(1 - q)).mean())
+
+            fit = min((i / 100 for i in range(30, 151)), key=loss)
+            slope = 1.0 + (fit - 1.0) * min(1.0, games / READY_GAMES)
+    except (OSError, ValueError, KeyError):
+        slope = 1.0
+    _cache["live_slope"] = (mtime, slope)
+    return slope
+
+
+def temper(p: float, slope: float | None = None) -> float:
+    """A live chance after the correction learned from the log (see live_slope)."""
+    a = live_slope() if slope is None else slope
+    if p <= 0.0 or p >= 1.0 or abs(a - 1.0) < 1e-9:
+        return p
+    return float(1 / (1 + math.exp(-a * math.log(p / (1 - p)))))
+
+
 def _flip(key: str) -> str | None:
     """The key of the other side of the same bet."""
     parts = key.split("|")
@@ -663,6 +714,9 @@ def _need_text(leg: dict, value: float, g: dict) -> str:
         return f"{'covering' if m > 0 else 'not covering'} by {n(abs(m))}"
     line = float(leg["line"])
     if mk == "anytime_td":
+        want = max(int(math.ceil(line)), 1)
+        if want > 1:
+            return f"{'finished with' if done else 'has'} {n(value)} of the {want} touchdowns needed"
         return ("scored" if done else "has scored") if value >= 1 else ("did not score" if done else "no touchdown yet")
     if done:
         return f"finished on {n(value)}"
@@ -734,7 +788,7 @@ def leg_view(leg: dict, sd: dict | None = None, fresh: dict | None = None) -> di
         else:
             out["status"] = "live"
         if line:
-            out["progress"] = max(0.0, min(value / line, 1.0)) if mk != "anytime_td" else float(value >= 1)
+            out["progress"] = max(0.0, min(value / (line if mk != "anytime_td" else math.ceil(line)), 1.0))
     else:
         margin, total = g["home_score"] - g["away_score"], g["home_score"] + g["away_score"]
         out["current"] = total if mk == "total" else (margin if side == "home" else -margin)
@@ -749,6 +803,12 @@ def leg_view(leg: dict, sd: dict | None = None, fresh: dict | None = None) -> di
             out["progress"] = max(0.0, min(total / line, 1.0))
     if out["decided"]:
         p_win, p_push = float(out["status"] == "won"), float(out["status"] == "push")
+    elif g["state"] == "in":
+        # the estimate has its own track record: correct it by what the graded live log has shown so far
+        p_raw = min(max(p_win, 0.0), 1.0)
+        p_win = temper(p_raw)
+        p_push = min(p_push, max(0.0, 1.0 - p_win))
+        out["p_raw"] = p_raw
     out.update(p_now=float(min(max(p_win, 0.0), 1.0)), p_push=float(min(max(p_push, 0.0), 1.0)), need=_need_text(leg, out["current"] or 0.0, g))
     return out
 
@@ -760,7 +820,7 @@ def bet_view(bet: dict, sd_by_sport: dict | None = None, fresh_legs: dict | None
     legs = json.loads(bet["legs_json"]) if isinstance(bet.get("legs_json"), str) else list(bet.get("legs") or [])
     views = [leg_view(l, (sd_by_sport or {}).get(str(l["sport"]).lower()), (fresh_legs or {}).get(l.get("key"))) for l in legs]
     stake, dec = float(bet["stake"]), float(bet["dec"])
-    payout_dec, p_all, worth, lost = dec, 1.0, 1.0, False
+    payout_dec, p_all, worth, alive, lost = dec, 1.0, 1.0, 1.0, False
     for v in views:
         if v["status"] == "lost":
             lost = True
@@ -769,38 +829,132 @@ def bet_view(bet: dict, sd_by_sport: dict | None = None, fresh_legs: dict | None
         elif not v["decided"]:
             p_all *= v["p_now"]
             worth *= v["p_now"] + v["p_push"] / (v["dec"] or 1.0)
+            alive *= min(v["p_now"] + v["p_push"], 1.0)  # a push keeps the bet alive at a smaller payout
     n_won = sum(v["status"] == "won" for v in views)
     n_open = sum(not v["decided"] for v in views)
     payout = stake * payout_dec
     if lost:
-        status, p_all, worth = "lost", 0.0, 0.0
+        status, p_all, worth, alive = "lost", 0.0, 0.0, 0.0
     elif n_open == 0:
         status = "won" if n_won else "push"
-        p_all = worth = 1.0
+        p_all = worth = alive = 1.0
     else:
         status = "live" if any(v["state"] == "in" for v in views) or n_won else "pre"
     return {"id": bet.get("id"), "placed_at": bet.get("placed_at"), "label": bet.get("legs"), "n": len(views), "legs": views,
             "stake": stake, "odds": bet.get("odds"), "payout": payout, "profit_if_win": payout - stake,
-            "p_all": p_all, "value": payout * worth, "worth_share": worth, "status": status, "won": n_won, "open": n_open,
+            "p_all": p_all, "p_nothing": max(0.0, 1.0 - alive), "value": payout * worth, "worth_share": worth, "status": status, "won": n_won, "open": n_open,
             "lost": sum(v["status"] == "lost" for v in views), "in_play": any(v["state"] == "in" for v in views),
             "same_game": len({(v["sport"], v["game"]) for v in views if not v["decided"]}) < n_open}
 
 
-# ============================================================================= cash-out
-def cash_out(offer: float, payout: float, p: float, bankroll: float | None = None, kelly_fraction: float = 0.25) -> dict:
-    """Compare a sportsbook's cash-out offer with what a live bet is worth.
+# ============================================================================= the money, all bets together
+def payout_board(views: list[dict]) -> dict:
+    """What the bets on the Live page can still pay, all together. A bet that has won is banked, one that has
+    lost can no longer pay, and the rest are still to play for, so the total moves as results come in."""
+    ok = [b for b in views if b.get("status") in ("pre", "live", "won", "push", "lost")]
+    won = [b for b in ok if b["status"] in ("won", "push")]
+    lost = [b for b in ok if b["status"] == "lost"]
+    alive = [b for b in ok if b["status"] in ("pre", "live")]
+    total = lambda bs, k: float(sum(float(b.get(k) or 0.0) for b in bs))  # noqa: E731
+    return {"possible": total(won, "payout") + total(alive, "payout"),
+            "won": total(won, "payout"), "n_won": len(won),
+            "alive": total(alive, "payout"), "n_alive": len(alive), "n_live": sum(1 for b in alive if b["status"] == "live"),
+            "lost": total(lost, "payout"), "n_lost": len(lost), "lost_stake": total(lost, "stake"),
+            "staked": total(ok, "stake"), "staked_alive": total(alive, "stake"),
+            # banked money, plus what the bets still alive are worth on average at the tool's estimates
+            "expected": total(won, "payout") + total(alive, "value")}
 
-    payout: what the bet returns if everything left wins.  p: the chance of that.
-    fair value = payout x p. Sportsbooks usually offer less than that and keep the difference.
-    A sure amount is worth more than a risky one of the same average, more so when the swing is large next
-    to your bankroll. That is priced with the same risk setting that sizes the stakes (fractional Kelly):
-    `risk_value` is the sure amount that is exactly as good as holding the bet. Below it, hold; above it, cash out."""
+
+def _when(x) -> pd.Timestamp | None:
+    t = pd.to_datetime(x, utc=True, errors="coerce")
+    return None if t is None or pd.isna(t) else t
+
+
+def settled_bets(bets: pd.DataFrame, views: list[dict] | None = None) -> list[dict]:
+    """Every bet with a result: {id, stake, pnl, status, at}. `at` is when the game that decided it started:
+    the last game of a bet that won, the game that sank one that lost. A night's late game then belongs to that
+    night, and a bet counts as soon as the live scores decide it, before the grader has written it down.
+
+    For a bet graded earlier the losing game is not kept, so it is placed three hours before the grading
+    (the wait the grader gives a game), held inside the span of the bet's own games."""
+    live_by = {str(v.get("id")): v for v in (views or []) if v.get("status") in ("won", "push", "lost")}
+    out = []
+    if bets is None or bets.empty:
+        return out
+    for b in bets.to_dict("records"):
+        bid, v = str(b.get("id")), None
+        v = live_by.get(bid)
+        status = str(b.get("status") or "")
+        graded = status in ("won", "lost", "push", "void") and not pd.isna(b.get("pnl"))
+        if not graded and v is None:
+            continue
+        try:
+            legs = json.loads(b["legs_json"]) if isinstance(b.get("legs_json"), str) else []
+        except ValueError:
+            legs = []
+        starts = sorted(t for t in (_when(l.get("start")) for l in legs) if t is not None)
+        stake = float(b.get("stake") or 0.0)
+        if v is not None:  # the live scores know which pick decided it
+            status = v["status"]
+            pnl = -stake if status == "lost" else float(v.get("payout") or 0.0) - stake
+            sunk = sorted(t for t in (_when(l.get("start")) for l in v.get("legs") or [] if l.get("status") == "lost") if t is not None)
+            at = (sunk[0] if sunk else None) if status == "lost" else (starts[-1] if starts else None)
+        else:
+            pnl = float(b["pnl"])
+            at = starts[-1] if starts else None
+            g = _when(b.get("graded_at"))
+            if status == "lost" and g is not None and starts:
+                at = min(max(g - pd.Timedelta(hours=3), starts[0]), starts[-1])
+            at = at if at is not None else g
+        at = at if at is not None else (starts[-1] if starts else _when(b.get("placed_at")))
+        if at is None:
+            continue
+        out.append({"id": bid, "stake": stake, "pnl": pnl, "status": status, "at": at})
+    return out
+
+
+def earnings(bets: pd.DataFrame, views: list[dict] | None = None, now: dt.datetime | None = None) -> list[dict]:
+    """Profit and loss on settled bets for today, this week (from Monday), this month and this year, in this
+    computer's own time. Each: {key, label, pnl, staked, n, won, lost}."""
+    now = now or dt.datetime.now().astimezone()
+    tz, today = now.tzinfo, now.date()
+    rows = [(r["at"].tz_convert(tz).date(), r) for r in settled_bets(bets, views)]
+    spans = [("day", "Today", lambda d: d == today),
+             ("week", "This week", lambda d: today - dt.timedelta(days=today.weekday()) <= d <= today),
+             ("month", "This month", lambda d: (d.year, d.month) == (today.year, today.month) and d <= today),
+             ("year", "This year", lambda d: d.year == today.year and d <= today)]
+    out = []
+    for key, label, inside in spans:
+        mine = [r for d, r in rows if inside(d)]
+        out.append({"key": key, "label": label, "pnl": float(sum(r["pnl"] for r in mine)), "staked": float(sum(r["stake"] for r in mine)),
+                    "n": len(mine), "won": sum(1 for r in mine if r["pnl"] > 0), "lost": sum(1 for r in mine if r["pnl"] < 0)})
+    return out
+
+
+# ============================================================================= cash-out
+def cash_out(offer: float, payout: float, p: float, bankroll: float | None = None, kelly_fraction: float = 0.25,
+             stake: float | None = None, p_nothing: float | None = None, cap: float = 0.03) -> dict:
+    """Compare a sportsbook's cash-out offer with what a live bet is worth to the bettor.
+
+    payout: what the bet returns if everything left wins.  p: the chance of that (pushes counted in).
+    p_nothing: the chance the bet returns nothing at all (1 - p when not given).
+    fair value = payout x p, the average. Holding is a gamble between the payout and nothing, and a sure amount
+    beats a gamble with the same average: `risk_value` is the sure amount exactly as good as holding, priced with
+    the same risk setting that sizes the stakes (fractional Kelly), so the bigger the swing next to the bankroll,
+    the further below the average it sits. The verdict always compares the offer with that, never with the average
+    alone. With no bankroll given, the bet's stake is taken as the largest stake the tool suggests (cap, 3%), which
+    is the smallest bankroll that is consistent with following it, so the risk is never left out."""
     p = min(max(float(p), 0.0), 1.0)
+    lose = min(max(float(1.0 - p if p_nothing is None else p_nothing), 0.0), 1.0)
     fair = payout * p
-    out = {"offer": float(offer), "payout": float(payout), "p": p, "fair": fair,
+    assumed = False
+    if not (bankroll and bankroll > 0) and stake and stake > 0 and cap > 0:
+        bankroll, assumed = float(stake) / cap, True
+    out = {"offer": float(offer), "payout": float(payout), "p": p, "p_nothing": lose, "fair": fair,
            "offer_share": (offer / fair) if fair > 0 else None,      # 0.90 = the book keeps 10%
            "breakeven_p": (offer / payout) if payout > 0 else None,  # the offer is the better deal only below this chance
-           "risk_value": None, "bankroll_share": None}
+           "risk_value": None, "bankroll_share": None, "bankroll": bankroll if bankroll and bankroll > 0 else None,
+           "bankroll_assumed": assumed}
     if bankroll and bankroll > 0 and payout > 0:
         g = 1.0 / max(kelly_fraction, 1e-6)  # relative risk aversion: quarter Kelly = 4
         if abs(g - 1.0) < 1e-9:
@@ -809,16 +963,21 @@ def cash_out(offer: float, payout: float, p: float, bankroll: float | None = Non
             u = p * (bankroll + payout) ** (1 - g) + (1 - p) * bankroll ** (1 - g)
             ce = u ** (1 / (1 - g)) - bankroll
         out.update(risk_value=float(ce), bankroll_share=payout / bankroll)
+    risk = out["risk_value"]
+    pc = round(lose * 100)
+    nothing = "almost no chance" if pc < 1 else f"a {pc}% chance"
+    whose = "a" if assumed else "your"
     if fair <= 0:
         out.update(verdict="gone", text="This bet can no longer win, so there is nothing to cash out.")
     elif offer >= fair:
-        out.update(verdict="take", text="Cash out: the offer is more than the bet is worth on these numbers.")
-    elif out["risk_value"] is not None and offer >= out["risk_value"]:
-        out.update(verdict="reasonable", text="Cashing out is reasonable: the offer is below the bet's average value, but the swing is "
-                                               "large for your bankroll and the sure money is worth more to you than the gamble.")
+        out.update(verdict="take", text=f"Cash out: the offer is more than the bet is worth even on average, and it removes {nothing} of getting nothing.")
+    elif risk is not None and offer >= risk:
+        out.update(verdict="reasonable", text=f"Cash out: the offer is a little under the bet's average worth, but holding leaves {nothing} of "
+                                               f"getting nothing, and for {whose} ${bankroll:,.0f} bankroll the sure money is worth more.")
     else:
-        out.update(verdict="hold", text="Hold: the sportsbook is offering less than the bet is worth"
-                                        + (", even allowing for the risk." if out["risk_value"] is not None else "."))
+        need = risk if risk is not None else fair
+        out.update(verdict="hold", text=f"Hold: even counting {nothing} of getting nothing, the offer is too low. "
+                                        f"Cashing out starts to make sense from about ${need:,.2f}.")
     return out
 
 

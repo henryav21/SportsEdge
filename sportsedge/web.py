@@ -26,6 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import access, betmoves, config, engine, live, markets, oddslog, parlay, plays, slipread, sources, tracker
+from .oddsmath import american_to_decimal
 from .util import norm_name
 
 UI_DIR = Path(__file__).resolve().parent / "ui"
@@ -127,6 +128,13 @@ STATE: dict = {"status": "idle", "log": [], "error": None, "run_at": None, "star
                "results": [], "legs": {}, "parlays": {}, "plays": {}, "params": {},
                # lines the user corrected by hand: (sport, game_id) -> {"change": {...}, "feed": {...}}
                "overrides": {},
+               # prop lines corrected by hand: "sport|player key|market" -> the line, and the feed's line at the time
+               "prop_fixes": {},
+               # a change arrived while an update was running: run again as soon as it ends
+               "again": False,
+               # player props the user's own app does not offer, kept out of every suggestion:
+               # "SPORT|market|side ('' = both)|player key ('' = every player)" -> what it is, for the page
+               "not_offered": {},
                # the automatic odds check: when it last ran, and what the feed showed then
                "checked_at": None, "feed": {}, "changes": 0}
 
@@ -167,8 +175,10 @@ def _run(sports: list[str], days: dict, props: bool, track: bool):
         results = []
         for sp in sports:
             _log(f"{sp.upper()}: starting")
-            res = engine.run_sport(sp, days=days.get(sp, 1), props=props, verbose=_log)
+            res = engine.run_sport(sp, days=days.get(sp, 1), props=props, verbose=_log, prop_lines=_prop_fix_lines())
             results.append(res)
+        _prune_prop_fixes(results)
+        _mark_prop_fixes(results)
         for (sp, gid), ov in list(STATE["overrides"].items()):
             # a hand-corrected line is kept only while the feed still shows the number it showed then
             res = next((r for r in results if r["sport"] == sp and gid in r.get("_feed_odds", {})), None)
@@ -180,7 +190,7 @@ def _run(sports: list[str], days: dict, props: bool, track: bool):
         _save_overrides()
         legs = [l for r in results for l in r["legs"]]
         _log("Searching parlays ...")
-        parlays = engine.build_parlays(legs) if legs else {}
+        parlays = engine.build_parlays(_on_offer(legs)) if legs else {}
         if track:
             try:
                 tracker.grade(verbose=False)
@@ -192,6 +202,7 @@ def _run(sports: list[str], days: dict, props: bool, track: bool):
             STATE.update(results=results, legs={l["key"]: l for l in _every_leg(results)}, parlays=parlays,
                          plays=_suggestions(results), status="ready",
                          run_at=dt.datetime.now().isoformat(timespec="seconds"), error=None)
+        _PROPS_CHECKED["at"] = time.time()  # this update has just read the prop feed
         try:
             check_odds()
         except Exception as e:
@@ -201,10 +212,94 @@ def _run(sports: list[str], days: dict, props: bool, track: bool):
         _log(f"Failed: {e!r}")
         with LOCK:
             STATE.update(status="error" if not STATE["results"] else "ready", error=f"{e!r}\n{traceback.format_exc(limit=6)}")
+    with LOCK:
+        again, STATE["again"] = STATE["again"], False
+    if again:  # a line was corrected while this update ran, and this update began before the change
+        start_run()
 
 
 def _overrides_path() -> Path:
     return tracker.history_dir() / "line_corrections.json"
+
+
+# ----------------------------------------------------------------------------- prop lines corrected by hand
+def _prop_fixes_path() -> Path:
+    return tracker.history_dir() / "prop_corrections.json"
+
+
+def _save_prop_fixes():
+    try:
+        _prop_fixes_path().write_text(json.dumps(STATE["prop_fixes"], indent=1), encoding="utf-8")
+    except Exception as e:
+        _log(f"Could not save prop corrections: {e!r}")
+
+
+def _load_prop_fixes():
+    try:
+        p = _prop_fixes_path()
+        if p.exists():
+            STATE["prop_fixes"].update(json.loads(p.read_text(encoding="utf-8")))
+    except Exception as e:
+        _log(f"Could not read saved prop corrections: {e!r}")
+
+
+def _fix_id(sport: str, player_key: str, market: str) -> str:
+    return f"{str(sport).lower()}|{player_key}|{market}"
+
+
+def _prop_fix_lines() -> pd.DataFrame | None:
+    """The corrections as prop lines for the engine. It puts them ahead of the feed's own lines and drops any
+    whose line the feed has moved since (see engine.current_fixes)."""
+    fx = list(STATE["prop_fixes"].values())
+    if not fx:
+        return None
+    df = pd.DataFrame([{"sport": f["sport"], "player": f["player"], "key": f["key"], "market": f["market"],
+                        "line": f["line"], "over_odds": f.get("over_odds"), "under_odds": f.get("under_odds"),
+                        "book": "corrected", "feed_line": f.get("feed_line")} for f in fx])
+    for c in ("line", "over_odds", "under_odds", "feed_line"):
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
+
+
+def _prune_prop_fixes(results: list[dict]):
+    """A correction ends when its game is no longer to come, or when the feed shows a different line from the one
+    it showed when the correction was made: by then the feed has caught up with the sportsbook."""
+    before = len(STATE["prop_fixes"])
+    for fid, f in list(STATE["prop_fixes"].items()):
+        res = next((r for r in results if r["sport"] == f["sport"]), None)
+        if res is None:  # that sport was not part of this update
+            continue
+        slate = res.get("slate")
+        gone = slate is None or slate.empty or str(f.get("game_id")) not in set(slate["game_id"].astype(str))
+        now = (res.get("_prop_feed") or {}).get((f["key"], f["market"]))
+        moved = now is not None and f.get("feed_line") is not None and abs(now - float(f["feed_line"])) > 1e-9
+        if gone or moved:
+            STATE["prop_fixes"].pop(fid)
+        else:
+            _log(f"{f['sport'].upper()}: kept your corrected line for {f['player']} ({float(f['line']):g})")
+    if len(STATE["prop_fixes"]) != before:
+        _save_prop_fixes()
+
+
+def _store_fix(res: dict, player: str, key: str, market: str, game_id, line: float, over=None, under=None):
+    """Keep a corrected line, with the line the feed shows for it now (or showed when it was first corrected)."""
+    sport = res["sport"]
+    fid = _fix_id(sport, key, market)
+    old = STATE["prop_fixes"].get(fid) or {}
+    feed = (res.get("_prop_feed") or {}).get((key, market), old.get("feed_line"))
+    num = lambda v: None if v is None or pd.isna(v) else float(v)  # noqa: E731
+    STATE["prop_fixes"][fid] = {"sport": sport, "player": player, "key": key, "market": market, "line": float(line),
+                                "over_odds": num(over), "under_odds": num(under), "feed_line": num(feed),
+                                "game_id": str(game_id), "at": dt.datetime.now().isoformat(timespec="seconds")}
+
+
+def _mark_prop_fixes(results: list[dict]):
+    """Mark the picks priced at a corrected line, with the feed's line beside it, for the page."""
+    for r in results:
+        for l in (r.get("legs") or []) + (r.get("lean_legs") or []):
+            f = STATE["prop_fixes"].get(_fix_id(l.get("sport", ""), l.get("player_key", ""), l.get("market_key", "")))
+            if f is not None and l.get("line") is not None and abs(float(l["line"]) - float(f["line"])) < 1e-9:
+                l["corrected"], l["feed_line"] = True, f.get("feed_line")
 
 
 def _save_overrides():
@@ -241,9 +336,61 @@ def _every_leg(results: list[dict]) -> list[dict]:
     return priced + [l for r in results for l in r.get("lean_legs") or [] if l["key"] not in have]
 
 
+def _not_offered_path() -> Path:
+    return tracker.history_dir() / "not_offered.json"
+
+
+def _save_not_offered():
+    try:
+        _not_offered_path().write_text(json.dumps(STATE["not_offered"], indent=1), encoding="utf-8")
+    except Exception as e:
+        _log(f"Could not save the bets marked as not offered: {e!r}")
+
+
+def _load_not_offered():
+    try:
+        p = _not_offered_path()
+        if p.exists():
+            STATE["not_offered"].update(json.loads(p.read_text(encoding="utf-8")))
+    except Exception as e:
+        _log(f"Could not read the bets marked as not offered: {e!r}")
+
+
+SCOPES = ("stat", "side", "player")  # a whole stat (overs and unders) / one side of it / one player's side of it
+
+
+def _rule_id(leg: dict, scope: str = "stat") -> str:
+    return "|".join([str(leg.get("sport", "")).upper(), str(leg.get("market_key", "")),
+                     "" if scope == "stat" else str(leg.get("side", "")),
+                     str(leg.get("player_key", "")) if scope == "player" else ""])
+
+
+def _offered(leg: dict) -> bool:
+    """False for a player prop the user marked as not on their app: a whole stat (no over/under on pass attempts),
+    one side of it (no unders on threes), or one player's. The feed is a sportsbook's menu, and an app can offer
+    less of it."""
+    rules = STATE["not_offered"]
+    if not rules or not leg.get("player_key"):
+        return True
+    if leg.get("rung") is not None:
+        # an "N or more" bet is its own listing on an app: only a mark made on one hides it, never a mark on
+        # the stat's over/under (an app can have "2+ threes" and no over/under on threes)
+        plus = {**leg, "side": "plus"}
+        return not any(_rule_id(plus, sc) in rules for sc in ("side", "player"))
+    return not any(_rule_id(leg, sc) in rules for sc in SCOPES)
+
+
+def _on_offer(legs: list[dict]) -> list[dict]:
+    return [l for l in legs if _offered(l)]
+
+
+def _rung_legs(results: list[dict]) -> list[dict]:
+    return [l for r in results for l in r.get("rung_legs") or []]
+
+
 def _suggestions(results: list[dict]) -> dict:
     try:
-        return plays.build(_every_leg(results))
+        return plays.build(_on_offer(_every_leg(results) + _rung_legs(results)))
     except Exception as e:  # suggestions are an extra: the slate must still load without them
         _log(f"Suggestions skipped: {e!r}")
         return {}
@@ -293,6 +440,34 @@ def _picks(keys: list[str], lines: dict | None = None) -> list[dict]:
             leg = _at_line(leg, float(mine))
         out.append(leg)
     return out
+
+
+def _with_live(legs: list[dict]) -> tuple[list[dict], dict]:
+    """The picks with a game already in play (or over) at the tool's live chance instead of the pre-game one,
+    so a slip that mixes started and coming games is priced as it stands. Returns the picks to price and, per
+    started pick, what the live feed showed. The pre-game chance (p_cond) is kept: the Live page starts from it."""
+    if not any(betmoves.started(l) for l in legs):
+        return legs, {}
+    sd, _ = _live_context()
+    out, info = [], {}
+    for l in legs:
+        if not betmoves.started(l):
+            out.append(l)
+            continue
+        try:
+            v = live.leg_view(l, sd.get(str(l.get("sport", "")).lower()), None)
+        except Exception as e:  # no live chance: keep the last pre-game one rather than refuse the slip
+            _log(f"Live chance for {l.get('selection')} skipped: {e!r}")
+            v = None
+        if v is None or v["state"] not in ("in", "post"):
+            out.append(l)
+            continue
+        info[l["key"]] = {"p_now": v["p_now"], "p_pre": v["p_pre"], "p_push": v["p_push"], "score": v["score"],
+                          "detail": v["detail"], "status": v["status"], "need": v["need"]}
+        # result=None: the pre-game simulation no longer describes this game, so it is priced on its own
+        out.append({**l, "p_win": v["p_now"], "p_push": v["p_push"], "result": None,
+                    "p_at_bet": v["p_now"], "score_at_bet": v["score"] or v["detail"]})
+    return out, info
 
 
 # ============================================================================= automatic odds check
@@ -376,6 +551,26 @@ def _stale_games() -> int:
     return n
 
 
+_PROPS_CHECKED = {"at": time.time()}  # the start-up update has just read the prop feed
+
+
+def _moved_props(now: pd.Timestamp | None = None) -> int:
+    """Prop lines in the feed, for games still to come, that differ from the ones the current picks were priced
+    at, or that are new since. The feed is read through its own 15-minute cache, so this costs little."""
+    now = now if now is not None else pd.Timestamp.now(tz="UTC")
+    n = 0
+    for r in STATE["results"]:
+        seen, up = r.get("_prop_feed"), r.get("_prop_games")
+        if seen is None or up is None or up.empty:
+            continue
+        up = up[pd.to_datetime(up["start"], utc=True) > now]
+        if up.empty:
+            continue
+        cur = engine.line_map(engine.feed_prop_lines(r["sport"], up))
+        n += sum(1 for k, v in cur.items() if k not in seen or abs(seen[k] - v) > 1e-9)
+    return n
+
+
 def _odds_loop():
     while True:
         time.sleep(max(config.ODDS_CHECK_MINUTES, 1) * 60)
@@ -390,16 +585,25 @@ def _odds_loop():
                 _log(f"Live price log skipped: {e!r}")
             last = dt.datetime.fromisoformat(STATE["run_at"]) if STATE["run_at"] else None
             old_enough = last is None or (dt.datetime.now() - last).total_seconds() >= config.AUTO_UPDATE_MINUTES * 60
-            if _stale_games() and old_enough:
+            if old_enough and _stale_games():
                 _log("A line moved in the feed: updating automatically")
                 start_run()
+            elif old_enough and time.time() - _PROPS_CHECKED["at"] >= config.PROP_CHECK_MINUTES * 60:
+                # player props move on their own, without the game's spread or total moving
+                _PROPS_CHECKED["at"] = time.time()
+                n = _moved_props()
+                if n:
+                    _log(f"{n} prop line{'s' if n > 1 else ''} moved in the feed: updating automatically")
+                    start_run()
         except Exception as e:  # the check must never take the dashboard down
             _log(f"Odds check failed: {e!r}")
 
 
-def start_run(sports=("nfl", "nba"), days=None, props=True, track=True) -> bool:
+def start_run(sports=("nfl", "nba"), days=None, props=True, track=True, queue=False) -> bool:
+    """queue: when an update is already running, run once more as soon as it ends (it began before a change)."""
     with LOCK:
         if STATE["status"] == "running":
+            STATE["again"] = STATE["again"] or queue
             return False
         STATE.update(status="running", log=[], started_at=time.time(),
                      params={"sports": list(sports), "days": days or {"nfl": 7, "nba": 1}, "props": props})
@@ -461,6 +665,19 @@ class PriceReq(BaseModel):
     track: bool = True
 
 
+class OfferedReq(BaseModel):
+    key: str | None = None      # a prop pick the user's app does not offer
+    scope: str = "stat"         # "stat": its whole stat, overs and unders. "side": that side of it. "player": this player's
+    restore: str | None = None  # the id of a rule to take away again
+    rung: bool = False          # the pick is held as an "N or more" bet: mark those, not the stat's over/under
+
+
+class PropFixReq(BaseModel):
+    key: str                    # a prop pick whose line the sportsbook has moved
+    line: float | None = None   # the line the sportsbook shows now
+    reset: bool = False         # go back to the feed's line
+
+
 class BetReq(BaseModel):
     keys: list[str]
     odds: float
@@ -509,7 +726,10 @@ def api_status(request: Request = None):
 # what the page needs of a prop that has no price: enough to list it, add it to the slip and record it
 LEAN_FIELDS = ["key", "sport", "game_id", "game", "home", "away", "start", "date", "subject", "book", "selection", "market",
                "market_key", "side", "player_key", "group", "line", "odds", "dec", "p_win", "p_push", "p_cond", "ev", "proj",
-               "proj_med", "sim_over", "lean", "flag", "assumed"]
+               "proj_med", "sim_over", "lean", "flag", "assumed", "corrected", "feed_line", "sim_only"]
+
+
+RUNG_FIELDS = LEAN_FIELDS + ["rung", "base_key", "p_fair", "edge"]
 
 
 STARTED_FIELDS = ["key", "sport", "game_id", "game", "home", "away", "start", "date", "subject", "book", "selection",
@@ -533,6 +753,7 @@ def api_slate():
                               "proj": records(r["proj"]), "model": clean(r["model"]),
                               "markets": r.get("labels", {}), "prop_book": r.get("prop_book") or "",
                               "prop_lines": clean(r.get("prop_lines") or []),
+                              "ladders": r.get("ladders") or {},
                               "prop_check": clean(r.get("prop_check"))})
     for mode, df in (STATE["parlays"] or {}).items():
         out["parlays"][mode] = records(df) if df is not None else []
@@ -551,8 +772,11 @@ def api_slate():
         out["live_test"] = None
     sug = STATE.get("plays") or {}
     lean = [{f: l.get(f) for f in LEAN_FIELDS} for l in STATE["legs"].values() if l.get("assumed")]
+    used = set(sug.get("keys") or [])  # the "N or more" picks the suggestions use: the page needs only those
+    rung = [{f: l.get(f) for f in RUNG_FIELDS} for l in _rung_legs(STATE["results"]) if l["key"] in used]
     out["plays"] = clean({"games": sug.get("games") or [], "groups": sug.get("groups") or [], "days": sug.get("days") or [],
-                          "lean_legs": lean, "assumed_odds": config.ASSUMED_PROP_ODDS})
+                          "lean_legs": lean, "rung_legs": rung, "assumed_odds": config.ASSUMED_PROP_ODDS})
+    out["not_offered"] = list(STATE["not_offered"].values())
     return out
 
 
@@ -571,9 +795,13 @@ def api_slip(req: SlipReq):
         return {"n": 0}
     # a pick taken at another line: what it is called there, its chance there, and whether it could be priced
     alts = {l["key"]: {"line": l.get("line"), "selection": l.get("selection"), "p_cond": l.get("p_cond"),
-                       "priced": l.get("alt_of") is not None} for l in legs if l["key"] in req.lines and
+                       "priced": l.get("alt_of") is not None,
+                       # an "N or more" bet the sportsbook prices: that price belongs to this line
+                       "own_price": bool(l.get("own_price")), "odds": l.get("odds") if l.get("own_price") else None}
+            for l in legs if l["key"] in req.lines and
             (l.get("alt_of") is not None or l.get("chance_line") is not None)}
-    return clean({**parlay.evaluate(legs), "alts": alts})
+    legs, now = _with_live(legs)
+    return clean({**parlay.evaluate(legs), "alts": alts, "live": now})
 
 
 @app.post("/api/props/price")
@@ -600,7 +828,15 @@ def api_price(req: PriceReq):
         same, other = df[df["same"]], df[~df["same"]]
         legs = []
         if not same.empty:  # the reference book's own line has moved: it becomes the reference
-            legs += markets.prop_legs(sport, same, res["prop_sims"], res["slate"], res["labels"], centre)
+            fixed_legs = markets.prop_legs(sport, same, res["prop_sims"], res["slate"], res["labels"], centre)
+            legs += fixed_legs
+            # and it is kept through later updates, until the feed's line moves or the game starts
+            for r in same.itertuples():
+                gid = next((l["game_id"] for l in fixed_legs if l.get("player_key") == r.key and l.get("market_key") == r.market), None)
+                if gid is not None:
+                    _store_fix(res, r.player, r.key, r.market, gid, r.line, r.over_odds, r.under_odds)
+            _save_prop_fixes()
+            _mark_prop_fixes([{"legs": fixed_legs}])
             res.setdefault("prop_ref", {}).update(markets.prop_reference(same))
             fixed = set(zip(same["key"], same["market"]))
             res["prop_lines"] = [p for p in res.get("prop_lines") or [] if (p["player_key"], p["market_key"]) not in fixed]
@@ -616,6 +852,61 @@ def api_price(req: PriceReq):
     if out:  # a line priced by hand can change which picks and parlays are best
         STATE["plays"] = _suggestions(STATE["results"])
     return {"legs": clean(out), "errors": errors}
+
+
+@app.post("/api/props/correct")
+def api_prop_correct(req: PropFixReq):
+    """The sportsbook has a prop at a line the feed has not caught up with (or, with reset, go back to the feed's
+    line). The correction is saved and the slate updated, so every pick, suggestion and parlay is priced at that
+    line, and later updates keep it until the feed's own line moves or the game starts. The feed's price belonged
+    to its line, so a corrected line is priced like a line without a price until odds are entered for it."""
+    leg = STATE["legs"].get(req.key)
+    if leg is None or not leg.get("player_key") or not leg.get("market_key"):
+        raise HTTPException(404, "That prop is not on the slate any more: its game may have started. Refresh the page.")
+    res = next((r for r in STATE["results"] if r["sport"] == str(leg["sport"]).lower()), None)
+    if res is None:
+        raise HTTPException(404, "That sport is not loaded - refresh first.")
+    fid = _fix_id(res["sport"], leg["player_key"], leg["market_key"])
+    feed = (res.get("_prop_feed") or {}).get((leg["player_key"], leg["market_key"]))
+    if req.reset or (req.line is not None and feed is not None and abs(req.line - feed) < 1e-9):
+        STATE["prop_fixes"].pop(fid, None)  # back to the feed (typing the feed's own line is the same thing)
+    else:
+        if req.line is None or not math.isfinite(req.line) or req.line < 0 or abs(req.line * 2 - round(req.line * 2)) > 1e-9:
+            raise HTTPException(400, "Type the line your sportsbook shows, such as 3.5.")
+        _store_fix(res, leg.get("subject") or leg["player_key"], leg["player_key"], leg["market_key"], leg["game_id"], req.line)
+    _save_prop_fixes()
+    start_run(queue=True)
+    return api_status(None)
+
+
+@app.post("/api/offered")
+def api_offered(req: OfferedReq):
+    """Mark a player prop as not on the user's app (or take a mark away). The feed is a sportsbook's menu and an
+    app can offer less of it, so marked bets are left out of the suggested picks and parlays from then on.
+    Nothing is re-simulated: the suggestions are rebuilt from the picks already priced."""
+    if req.restore is not None:
+        STATE["not_offered"].pop(req.restore, None)
+    else:
+        leg = STATE["legs"].get(req.key or "") or _started().get(req.key or "")
+        if leg is None or not leg.get("player_key"):
+            raise HTTPException(404, "That player prop is not on the slate any more. Refresh the page.")
+        scope = req.scope if req.scope in SCOPES else "stat"
+        if req.rung:
+            leg, scope = {**leg, "side": "plus"}, "player" if scope == "player" else "side"
+        rid = _rule_id(leg, scope)
+        one = scope == "player"
+        STATE["not_offered"][rid] = {"id": rid, "sport": str(leg["sport"]).upper(), "market_key": leg["market_key"],
+                                     "market": leg.get("market") or leg["market_key"],
+                                     "side": "" if scope == "stat" else (leg.get("side") or ""),
+                                     "player_key": leg["player_key"] if one else "",
+                                     "player": (leg.get("subject") or leg["player_key"]) if one else ""}
+    _save_not_offered()
+    with LOCK:
+        legs = [l for r in STATE["results"] for l in r.get("legs") or []]
+        if legs:
+            STATE["parlays"] = engine.build_parlays(_on_offer(legs))
+        STATE["plays"] = _suggestions(STATE["results"])
+    return {"not_offered": list(STATE["not_offered"].values())}
 
 
 @app.post("/api/games/line")
@@ -639,7 +930,7 @@ def api_game_line(req: GameLineReq):
         _save_overrides()
         legs = [l for r in STATE["results"] for l in r["legs"]]
         STATE["legs"] = {l["key"]: l for l in _every_leg(STATE["results"])}
-        STATE["parlays"] = engine.build_parlays(legs)
+        STATE["parlays"] = engine.build_parlays(_on_offer(legs))
         STATE["plays"] = _suggestions(STATE["results"])
     try:  # the logged pick should carry the line that was really on offer
         tracker.log_slate([{"legs": gl}], {})
@@ -674,7 +965,13 @@ def api_live():
         scores = live.scores()
     except Exception:  # the scoreboard is an extra: never let it take the bets down with it
         scores = []
-    return clean({"bets": bets, "scores": scores, "updated": dt.datetime.now().isoformat(timespec="seconds"),
+    try:  # the two money cards: what everything can still pay, and what has been earned
+        board, earned = live.payout_board(bets), live.earnings(recorded, bets)
+    except Exception as e:  # an extra: never let it take the bets down with it
+        _log(f"Payout and earnings cards skipped: {e!r}")
+        board, earned = None, []
+    return clean({"bets": bets, "scores": scores, "board": board, "earnings": earned,
+                  "updated": dt.datetime.now().isoformat(timespec="seconds"),
                   "in_play": any(b.get("in_play") for b in bets) or any(g["state"] == "in" for g in scores),
                   "kelly_fraction": config.KELLY_FRACTION})
 
@@ -716,7 +1013,8 @@ def api_cashout(req: CashOutReq):
         raise HTTPException(400, "The offer must be zero or more.")
     sd, legs = _live_context()
     v = live.bet_view(row.iloc[0].to_dict(), sd, legs)
-    return clean({**live.cash_out(req.offer, v["payout"], v["worth_share"], req.bankroll, config.KELLY_FRACTION),
+    return clean({**live.cash_out(req.offer, v["payout"], v["worth_share"], req.bankroll, config.KELLY_FRACTION,
+                                  stake=v["stake"], p_nothing=v["p_nothing"], cap=config.KELLY_CAP),
                   "bet_id": req.bet_id, "stake": v["stake"]})
 
 
@@ -798,8 +1096,13 @@ def api_place(req: BetReq):
         raise HTTPException(400, "Those picks are no longer loaded - refresh the slate.")
     if req.stake <= 0:
         raise HTTPException(400, "Stake must be positive.")
+    legs, _ = _with_live(legs)  # a game already in play counts at its chance now, not the one before it began
     ev = parlay.evaluate(legs)
-    row = tracker.place_bet(legs, req.odds, req.stake, ev["p_hit"], ev["p_win_all"], ev["ev"], req.note)
+    # the value at the price actually paid. evaluate() prices the slip at the picks' own odds multiplied together;
+    # scaling by paid / those odds keeps its handling of pushes, which settle the same way (the pushed pick drops out)
+    paid = american_to_decimal(req.odds)
+    ev_paid = (1.0 + ev["ev"]) * paid / ev["dec"] - 1.0 if ev["dec"] > 1 else ev["ev"]
+    row = tracker.place_bet(legs, req.odds, req.stake, ev["p_hit"], ev["p_win_all"], ev_paid, req.note)
     return clean(row)
 
 
@@ -814,6 +1117,8 @@ def serve(host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True, 
     import uvicorn
 
     _load_overrides()
+    _load_prop_fixes()
+    _load_not_offered()
     if autorun:
         start_run()
     threading.Thread(target=_odds_loop, daemon=True).start()

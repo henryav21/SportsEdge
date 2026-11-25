@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 
-from . import config, markets, parlay, sources
+from . import config, markets, parlay, plays, sources
 
 
 GAME_MARKETS = ("Moneyline", "Spread", "Total")
@@ -52,6 +52,7 @@ def price_at(res: dict, leg: dict, line: float, change: dict | None = None) -> d
     (a moneyline has no line, or the simulation for it is no longer loaded)."""
     mk, gid, sport = leg.get("market_key"), leg["game_id"], res["sport"]
     line = float(line)
+    own_odds = None  # the feed's own price for this line, where it lists one as an "N or more" bet
     if mk in ("spread", "total"):
         if gid not in res.get("_feed_rows", {}) or gid not in res.get("_sims", {}):
             return None
@@ -66,6 +67,12 @@ def price_at(res: dict, leg: dict, line: float, change: dict | None = None) -> d
         row["mu_margin"] = float(model.blend(row["pm"], row["mkt_margin"], model.w_margin))
         row["mu_total"] = float(model.blend(row["pt"], row["mkt_total"], model.w_total))
         new = markets.game_leg_at(sport, SimpleNamespace(**row), model, res["_sims"][gid], odds, mk, leg["side"], line)
+    elif mk == "anytime_td" and leg.get("sim_only"):  # 2+ or 3+ touchdowns from the anytime pick
+        sims, who = res.get("prop_sims") or {}, leg.get("player_key")
+        if gid not in sims or who not in sims[gid] or mk not in sims[gid][who] or line < 0.5:
+            return None
+        new = markets.td_leg(sport, gid, res["slate"].set_index("game_id").loc[gid], leg.get("subject"), who,
+                             sims[gid][who][mk], line, res["labels"], leg.get("book") or "")
     elif mk == "ml" or leg.get("side") not in ("over", "under"):
         return None
     else:
@@ -81,12 +88,22 @@ def price_at(res: dict, leg: dict, line: float, change: dict | None = None) -> d
         if new is not None:
             new["p_fair"] = None  # the prices handed in were placeholders: there is no market price at this line
             new["edge"] = np.nan
+            # a line the feed lists as an "N or more" bet: the chance shown on the page for it is the one used
+            rung = next((t for t in (res.get("ladders") or {}).get(leg.get("group"), []) if abs(t[0] - 0.5 - line) < 1e-9), None)
+            if rung is not None:
+                p = rung[1] if leg["side"] == "over" else 1.0 - rung[1]
+                new.update(p_cond=p, p_win=p * (1 - new["p_push"]), rung=rung[0])
+                own_odds = rung[2] if leg["side"] == "over" else None  # "N or more" is the over: its price is not the under's
     if new is None:
         return None
     # the price shown with it still belongs to the tool's line; the caller supplies the real one
     new.update(odds=leg["odds"], dec=leg["dec"], alt_of=leg.get("line"), book=leg.get("book") or "")
     if leg.get("assumed"):
         new["assumed"] = True
+    if own_odds is not None:  # the sportsbook does price this line: that price, not the main line's
+        new.update(odds=float(own_odds), dec=markets.american_to_decimal(own_odds), own_price=True)
+        new.pop("assumed", None)
+        new["ev"] = markets.expected_value(new["p_win"], new["dec"], new["p_push"])
     return new
 
 
@@ -167,21 +184,19 @@ def run_sport(sport: str, days: int = 1, props_csv: str | None = None, props: bo
     prop_book = ""
     prop_centre = {"*": 0.0}
     prop_ref, prop_only, prop_check, lean = {}, [], None, []
+    prop_feed, ladders, rung_legs = {}, {}, []
     if props:
         # your own lines first, then The Odds API, then the free ESPN feed; one line per player and market
         lines = []
         if props_csv:
             lines.append(sources.csv_props(props_csv, sport))
-        if prop_lines is not None and not prop_lines.empty:
-            lines.append(prop_lines[prop_lines["sport"].str.lower() == sport])
-        if config.ODDS_API_KEY:
-            lines.append(sources.oddsapi_props(sport, up))
         if config.ESPN_PROPS:
             log(f"{sport.upper()}: downloading prop lines ...")
-            try:
-                lines.append(sources.espn_props(sport, up))
-            except Exception as e:  # a missing feed must not cost the game picks
-                log(f"{sport.upper()}: prop lines unavailable: {e!r}")
+        feed = feed_prop_lines(sport, up, log)
+        prop_feed = line_map(feed)
+        if prop_lines is not None and not prop_lines.empty:
+            lines.append(current_fixes(prop_lines[prop_lines["sport"].str.lower() == sport], prop_feed, log, sport))
+        lines.append(feed)
         lines = [x for x in lines if x is not None and not x.empty]
         lined = set(pd.concat(lines, ignore_index=True)["key"]) if lines else None
         log(f"{sport.upper()}: simulating player props ...")
@@ -218,6 +233,16 @@ def run_sport(sport: str, days: int = 1, props_csv: str | None = None, props: bo
             pl = markets.prop_legs(sport, ln, prop_sims, slate.assign(start=slate["start"]), pmod.MARKET_LABEL,
                                    prop_centre)
             legs += pl
+            # the "N or more" bets and the touchdown scorers: what a trading app lists beside, or instead of,
+            # an over/under
+            rungs = feed_rungs(sport, up, log)
+            ladders = markets.ladders(sport, rungs, prop_sims, prop_centre, prop_ref, markets.prop_hold(ln))
+            # the ones that can be suggested, as picks: beside the overs they are another form of
+            mains = {(l["player_key"], l["market_key"]): l for l in lean + pl if l.get("side") == "over"}
+            rung_legs = markets.rung_legs(sport, rungs, prop_sims, slate.assign(start=slate["start"]), pmod.MARKET_LABEL,
+                                          prop_centre, prop_ref, markets.prop_hold(ln), ladders, mains,
+                                          plays.MIN_EV, plays.LEAN_MIN)
+            lean += markets.td_legs(sport, rungs, prop_sims, slate.assign(start=slate["start"]), pmod.MARKET_LABEL)
             prop_book = ln["book"].dropna().astype(str).value_counts().index[0] if ln["book"].notna().any() else ""
             log(f"{sport.upper()}: {len(ln)} prop lines, {len(pl)} priced bets"
                 + (f", {len(prop_only)} lines without a price" if prop_only else ""))
@@ -237,11 +262,70 @@ def run_sport(sport: str, days: int = 1, props_csv: str | None = None, props: bo
             "prop_book": prop_book, "prop_centre": prop_centre, "prop_ref": prop_ref, "prop_lines": prop_only,
             # unpriced props as picks at an assumed price: for the bet slip and the suggested parlays only
             "lean_legs": lean,
+            # "game|player|stat" -> the "N or more" bets on it, each with the tool's chance
+            "ladders": ladders,
+            # the "N or more" bets that may be suggested, as picks (never part of `legs`: see markets.rung_legs)
+            "rung_legs": rung_legs,
             "prop_check": prop_check,
             # kept so one game can be re-priced when the user corrects a line the feed has not caught up with
             "_model": model, "_sims": sims, "_feed_rows": feed_rows, "_feed_odds": feed_odds,
+            # (player key, market) -> the prop line the feed showed for this run, and the games it was read for,
+            # to tell when it moves
+            "_prop_feed": prop_feed, "_prop_games": up if props else None,
             "prop_sims": prop_sims, "slate": slate[["game_id", "home", "away", "start"]].copy(),
             "labels": pmod.MARKET_LABEL}
+
+
+def feed_prop_lines(sport: str, games: pd.DataFrame, log=None) -> pd.DataFrame:
+    """The prop lines the feeds carry for these games: The Odds API first when there is a key, then ESPN's copy
+    of DraftKings. One line per player and market."""
+    parts = []
+    if config.ODDS_API_KEY:
+        parts.append(sources.oddsapi_props(sport, games))
+    if config.ESPN_PROPS:
+        try:
+            parts.append(sources.espn_props(sport, games))
+        except Exception as e:  # a missing feed must not cost the game picks
+            if log:
+                log(f"{sport.upper()}: prop lines unavailable: {e!r}")
+    parts = [x for x in parts if x is not None and not x.empty]
+    if not parts:
+        return pd.DataFrame(columns=sources.PROP_COLS)
+    return pd.concat(parts, ignore_index=True).drop_duplicates(subset=["key", "market"], keep="first")
+
+
+def feed_rungs(sport: str, games: pd.DataFrame, log=None) -> pd.DataFrame:
+    """The "N or more" bets and touchdown scorers in ESPN's copy of DraftKings (the same download as the lines)."""
+    if config.ESPN_PROPS:
+        try:
+            return sources.espn_rungs(sport, games)
+        except Exception as e:  # an extra: never lose the picks because of it
+            if log:
+                log(f"{sport.upper()}: 'N or more' bets unavailable: {e!r}")
+    return pd.DataFrame(columns=sources.RUNG_COLS)
+
+
+def line_map(lines: pd.DataFrame) -> dict:
+    """(player key, market) -> line."""
+    if lines is None or lines.empty:
+        return {}
+    return {(r.key, r.market): float(r.line) for r in lines.itertuples() if not pd.isna(r.line)}
+
+
+def current_fixes(mine: pd.DataFrame, feed: dict, log=None, sport: str = "") -> pd.DataFrame:
+    """The lines the user corrected by hand that still apply. A correction carries the line the feed showed when
+    it was made (feed_line) and is used while the feed still shows that line, or shows nothing for it. Once the
+    feed moves, it has caught up with the sportsbook and its own line is used again."""
+    if mine is None or mine.empty or "feed_line" not in mine:
+        return mine
+    keep = []
+    for r in mine.itertuples():
+        now = feed.get((r.key, r.market))
+        ok = pd.isna(r.feed_line) or now is None or abs(now - float(r.feed_line)) < 1e-9
+        if not ok and log:
+            log(f"{sport.upper()}: the feed now has {r.player} at {now:g}, so your corrected line ({float(r.line):g}) is no longer needed")
+        keep.append(ok)
+    return mine[keep]
 
 
 def build_parlays(legs: list[dict]) -> dict:

@@ -34,7 +34,9 @@ LEG_FIELDS = ["key", "sport", "game_id", "date", "home", "away", "market_key", "
 EXPIRE_DAYS = 10  # an open pick with no official result after this long is voided
 # p_fair and book are kept so that later line movement can be measured against the number the bet was made at
 # chance_line: the tool's line, when the bet was recorded at a different one. The stored chance belongs to it.
-BET_LEG_EXTRA = ["selection", "subject", "market", "odds", "p_cond", "p_push", "proj", "start", "p_fair", "book", "chance_line"]
+# p_at_bet / score_at_bet: for a game already in play when the bet was recorded, the live chance and the score then
+BET_LEG_EXTRA = ["selection", "subject", "market", "odds", "p_cond", "p_push", "proj", "start", "p_fair", "book", "chance_line",
+                 "p_at_bet", "score_at_bet"]
 
 NFL_STAT = {"pass_yds": ["passing_yards"], "pass_tds": ["passing_tds"], "pass_cmp": ["completions"],
             "pass_att": ["attempts"], "rush_yds": ["rushing_yards"], "rush_att": ["carries"],
@@ -226,6 +228,13 @@ def pnl(status: str, dec: float) -> float:
 
 
 # ============================================================================= official results
+def _final(rows: pd.DataFrame) -> bool:
+    """Are these NBA game-log rows from a finished game? A game in progress is listed with no win or loss yet."""
+    if "WL" not in rows:
+        return True
+    return bool(rows["WL"].astype(str).str.strip().isin(["W", "L"]).all())
+
+
 class Resolver:
     """Looks up final scores, player stat lines and closing lines for the picks being graded."""
 
@@ -296,8 +305,8 @@ class Resolver:
         day = t[t["GAME_DATE"].astype(str).str[:10] == l["date"]]
         h = day[(day["TEAM_ABBREVIATION"] == l["home"]) & day["MATCHUP"].str.contains(l["away"])]
         a = day[(day["TEAM_ABBREVIATION"] == l["away"]) & day["MATCHUP"].str.contains(l["home"])]
-        if h.empty or a.empty:
-            return None
+        if h.empty or a.empty or not (_final(h) and _final(a)):
+            return None  # not played yet, or still being played: the NBA's game log lists games in progress
         hp, ap = float(h["PTS"].iloc[0]), float(a["PTS"].iloc[0])
         return hp - ap, hp + ap
 
@@ -314,6 +323,8 @@ class Resolver:
                 return None
             g = p[(p["GAME_DATE"].astype(str).str[:10] == l["date"]) & p["TEAM_ABBREVIATION"].isin([l["home"], l["away"]])]
             cols = NBA_STAT.get(l["market_key"])
+            if not g.empty and not _final(g):
+                return None  # still being played: a player missing so far may yet come on, and every stat can still grow
         if g.empty or cols is None:
             return None
         row = g[g["pkey"] == l["player_key"]]
@@ -467,7 +478,11 @@ def _settle_combo(res: "Resolver", legs: list[dict]):
     """Settle a parlay / placed bet. Returns None while any leg is pending, else (status, factor) where the
     payout is stake x total decimal x factor (a pushed or void leg drops out of the parlay, as at a book)."""
     stats, factor = [], 1.0
+    now = pd.Timestamp.now(tz="UTC")
     for leg in legs:
+        start = pd.to_datetime(leg.get("start"), utc=True, errors="coerce")
+        if pd.notna(start) and start > now - pd.Timedelta(hours=3):
+            return None  # the same wait as a single pick: no result is trusted while its game may still be on
         out = res.settle(pd.Series(leg))
         if out is None:
             return None

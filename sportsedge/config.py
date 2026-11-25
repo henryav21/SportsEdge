@@ -57,6 +57,9 @@ ESPN_PROPS = True
 ODDS_CHECK_MINUTES = 3
 # When a check finds that a line has moved and the last full update is at least this old, update everything.
 AUTO_UPDATE_MINUTES = 12
+# Player prop lines move on their own: the prop feed is compared with the current picks this often (it is
+# cached for 15 minutes, so checking more often finds nothing new).
+PROP_CHECK_MINUTES = 15
 # How many recent game days of real closing prop lines the prop simulator is tested on (see propcheck.py).
 PROP_CHECK_DAYS = 30
 # Results tracker: once this many props are graded (history/picks.csv), the prop weight is learned from them,

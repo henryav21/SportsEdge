@@ -171,6 +171,14 @@ def _sigmoid(x):
     return 1.0 / (1.0 + np.exp(-x))
 
 
+def _moved(pc: float, ref_pc: float, ref_fair: float) -> float:
+    """The market's chance at a line it has not priced: the simulator's chance there, shifted in log-odds by as
+    much as the simulator sits from the market at the line it has priced. Next to the priced line this is the
+    plain gap in chance. Far from it the chance still falls away towards nothing, as it must, where adding the
+    gap would leave "45 or more points" stuck at the size of the gap."""
+    return float(_sigmoid(_logit(pc) + _logit(ref_fair) - _logit(ref_pc)))
+
+
 def _locate(prop_sims: dict) -> dict:
     where = {}
     for gid, players in prop_sims.items():
@@ -247,6 +255,167 @@ def lean_legs(sport: str, lines: pd.DataFrame, prop_sims: dict, games: pd.DataFr
                      _result(x < line, x == line), side="under", **common)
         over["lean"], under["lean"] = pc - 0.5, 0.5 - pc  # how far the simulator is from an even bet, toward this side
         legs += [over, under]
+    return legs
+
+
+def rung_chance(x: np.ndarray, line: float, shift: float, ref: tuple, weight: float, own: float | None = None) -> float:
+    """The chance a stat finishes over a line that is not the sportsbook's main one (given no push): the
+    simulator's chance at that line, blended with the market's. The market's is, in order: the main line's fair
+    chance when this is the main line; the sportsbook's own price for this threshold with the fee taken out
+    (`own`), when the feed has one; otherwise the main line's fair chance moved to this line (see _moved)."""
+    pp = float(np.mean(x == line))
+    pc = float(_sigmoid(_logit(float(np.mean(x > line)) / max(1 - pp, 1e-9)) + shift))
+    ref_line, ref_fair = ref
+    if abs(line - ref_line) < 1e-9:
+        mo = ref_fair
+    elif own is not None:
+        mo = own
+    else:
+        rp = float(np.mean(x == ref_line))
+        ref_pc = float(_sigmoid(_logit(float(np.mean(x > ref_line)) / max(1 - rp, 1e-9)) + shift))
+        mo = _moved(pc, ref_pc, ref_fair)
+    return weight * pc + (1 - weight) * mo
+
+
+RUNG_HOLD = 1.07  # a one-sided price has the fee in it: about what DraftKings' two-sided prop prices add up to
+
+
+def prop_hold(lines: pd.DataFrame) -> dict:
+    """(player key, market) -> what the two sides of its main line add up to (1.00 would be no fee)."""
+    out = {}
+    for r in lines.itertuples():
+        if not pd.isna(r.over_odds) and not pd.isna(r.under_odds):
+            out[(r.key, r.market)] = float(implied(r.over_odds) + implied(r.under_odds))
+    return out
+
+
+RUNG_MIN, RUNG_MAX = 0.01, 0.985  # a threshold almost sure to be missed or met is not a bet worth listing
+
+
+def ladders(sport: str, rungs: pd.DataFrame, prop_sims: dict, centre: dict, ref: dict, hold: dict | None = None) -> dict:
+    """The "N or more" bets in the feed, each with the tool's chance:
+    {"game id|player key|stat": [[N, chance, the feed's odds or None], ...]}, lowest N first.
+
+    "4+ receptions" is the over on 3.5. Its chance blends the simulator with the market: the sportsbook's own
+    price for that threshold where the feed has one (NBA), its fee taken out with the hold of the same player's
+    main line; otherwise the main over/under line moved to the threshold (NFL). A stat with no main line is left
+    out, since there is nothing to anchor it to. Touchdowns are the exception: no line exists for them at all,
+    so 1+ (anytime), 2+ and 3+ carry the simulator's own chance and the page says so."""
+    if rungs is None or rungs.empty or not prop_sims:
+        return {}
+    from .tracker import prop_weight as _learned  # lazy: tracker reads the graded history
+
+    where, wp, out = _locate(prop_sims), _learned(sport), {}
+    for r in rungs.itertuples():
+        gid = where.get(r.key)
+        if gid is None or r.market not in prop_sims[gid][r.key]:
+            continue
+        x, line = prop_sims[gid][r.key][r.market], float(r.n) - 0.5
+        if r.market == "anytime_td":
+            p = float(np.mean(x > line))
+        else:
+            rf = (ref or {}).get((r.key, r.market))
+            if rf is None:
+                continue
+            own = None
+            if not pd.isna(r.odds):
+                own = float(np.clip(implied(r.odds) / (hold or {}).get((r.key, r.market), RUNG_HOLD), 0.002, 0.998))
+            p = rung_chance(x, line, centre.get(r.market, centre.get("*", 0.0)), rf, wp, own)
+        if not (RUNG_MIN <= p <= RUNG_MAX):
+            continue
+        odds = None if pd.isna(r.odds) else float(r.odds)
+        out.setdefault(f"{gid}|{r.key}|{r.market}", []).append([int(r.n) if float(r.n).is_integer() else float(r.n), round(p, 4), odds])
+    for v in out.values():
+        v.sort(key=lambda t: t[0])
+    return out
+
+
+RUNG_DEC = (1.2, 4.5)  # a priced threshold far outside the prices a suggestion uses is never built
+
+
+def rung_legs(sport: str, rungs: pd.DataFrame, prop_sims: dict, games: pd.DataFrame, labels: dict, centre: dict,
+              ref: dict, hold: dict, ladder: dict, mains: dict, min_ev: float = -0.06, min_lean: float = 0.10) -> list[dict]:
+    """The "N or more" bets that can be suggested, as picks of their own. They are kept apart from the slate's
+    picks: each is another way to bet a stat that already has an over, and a bet slip holds one as that over at
+    the threshold's line (`base_key`, `rung`).
+
+    Priced in the feed (NBA): any threshold whose price is near the band a suggestion uses, at that price.
+    Not priced (NFL): only the threshold that is the main line itself ("37+" beside an over 36.5). It is the same
+    bet as the over and carries the over's assumed price, so the over can still be suggested where an app
+    lists the stat only as "N or more".
+    ladder: ladders() for the same lines, so a pick here has exactly the chance the page shows for it.
+    mains: (player key, stat) -> the main over pick. A threshold is built only where that pick exists.
+    min_ev, min_lean: what a suggestion asks of a pick (plays.MIN_EV, plays.LEAN_MIN). A threshold that cannot
+    be suggested is not built at all: each pick carries a simulated result per run, and there are thousands."""
+    if rungs is None or rungs.empty or not prop_sims:
+        return []
+    where, ginfo, legs = _locate(prop_sims), games.set_index("game_id"), []
+    for r in rungs.itertuples():
+        gid, main, rf = where.get(r.key), mains.get((r.key, r.market)), (ref or {}).get((r.key, r.market))
+        if r.market == "anytime_td" or gid is None or main is None or rf is None or r.market not in prop_sims[gid][r.key]:
+            continue
+        grp = f"{gid}|{r.key}|{r.market}"
+        n = int(r.n) if float(r.n).is_integer() else float(r.n)
+        step = next((t for t in (ladder or {}).get(grp, []) if t[0] == n), None)
+        if step is None:
+            continue
+        line, priced = float(r.n) - 0.5, not pd.isna(r.odds)
+        twin = abs(line - rf[0]) < 1e-9
+        if priced:
+            if not (RUNG_DEC[0] <= american_to_decimal(r.odds) <= RUNG_DEC[1]):
+                continue
+            odds = float(r.odds)
+        elif twin and main.get("assumed"):
+            odds = float(main["odds"])
+        else:
+            continue
+        x, g = prop_sims[gid][r.key][r.market], ginfo.loc[gid]
+        pc = float(_sigmoid(_logit(float(np.mean(x > line))) + centre.get(r.market, centre.get("*", 0.0))))
+        own = float(np.clip(implied(odds) / (hold or {}).get((r.key, r.market), RUNG_HOLD), 0.002, 0.998)) if priced else None
+        market = rf[1] if twin else own
+        label = labels.get(r.market, r.market)
+        base = {**_base(sport, gid, g.home, g.away, g.start, r.player, getattr(r, "book", "")),
+                "proj_med": float(np.median(x)), "sim_over": pc}
+        if abs(pc - market) >= PROP_GAP_FLAG:  # the simulator is far from the market: news it has not seen
+            continue
+        if (step[1] * american_to_decimal(odds) - 1.0 < min_ev) if priced else (abs(pc - 0.5) < min_lean):
+            continue
+        flag = ""
+        leg = _leg(base, f"{r.player} {n}+ {label}", label, grp, odds, step[1], 0.0, pc, own, _result(x > line),
+                   line=line, proj=float(np.mean(x)), flag=flag, market_key=r.market, side="over", player_key=r.key)
+        leg.update(key=f"{main['key']}|{n}+", rung=n, base_key=main["key"])
+        if not priced:
+            leg.update(assumed=True, lean=pc - 0.5)  # as for any line without a price: suggested on the simulator's lean
+        legs.append(leg)
+    return legs
+
+
+def td_leg(sport: str, gid, g, player: str, key: str, x: np.ndarray, line: float, labels: dict, book: str = "") -> dict:
+    """A touchdown-scorer pick: anytime (line 0.5), or 2+ / 3+ touchdowns (1.5, 2.5). The chance is the
+    simulator's own: no sportsbook line or price exists to check it against, so it is marked `sim_only`, carries
+    an assumed price only so that it can sit in a bet slip, and is never rated or suggested."""
+    n = int(round(line + 0.5))
+    p = float(np.mean(x > line))
+    base = {**_base(sport, gid, g.home, g.away, g.start, player, book), "proj_med": float(np.median(x)),
+            "assumed": True, "sim_only": True}
+    leg = _leg(base, f"{player} anytime TD" if n <= 1 else f"{player} {n}+ TDs", labels.get("anytime_td", "Anytime TD"),
+               f"{gid}|{key}|anytime_td", float(config.ASSUMED_PROP_ODDS), p, 0.0, p, None, _result(x > line),
+               line=float(line), proj=float(np.mean(x)), market_key="anytime_td", side="yes", player_key=key)
+    leg.update(ev=None, kelly=0.0, lean=None)  # nothing to rate it against until a real price is typed
+    return leg
+
+
+def td_legs(sport: str, rungs: pd.DataFrame, prop_sims: dict, games: pd.DataFrame, labels: dict) -> list[dict]:
+    """An anytime-touchdown pick for every player the feed lists as a scorer without a price."""
+    if rungs is None or rungs.empty or not prop_sims:
+        return []
+    where, ginfo, legs = _locate(prop_sims), games.set_index("game_id"), []
+    for r in rungs[(rungs["market"] == "anytime_td") & (rungs["n"] == 1) & rungs["odds"].isna()].itertuples():
+        gid = where.get(r.key)
+        if gid is None or "anytime_td" not in prop_sims[gid][r.key]:
+            continue
+        legs.append(td_leg(sport, gid, ginfo.loc[gid], r.player, r.key, prop_sims[gid][r.key]["anytime_td"], 0.5,
+                           labels, getattr(r, "book", "")))
     return legs
 
 
@@ -344,7 +513,7 @@ def prop_legs(sport: str, lines: pd.DataFrame, prop_sims: dict, games: pd.DataFr
             rp = float(np.mean(x == ref_line))
             ref_pc = float(np.mean(x > ref_line)) / max(1 - rp, 1e-9)
             ref_pc = float(_sigmoid(_logit(ref_pc) + centre.get(r.market, centre.get("*", 0.0))))
-            mo = float(np.clip(ref_fair + (pc - ref_pc), 0.01, 0.99))
+            mo = _moved(pc, ref_pc, ref_fair)
             mu = 1 - mo
             base = {**base, "ref_line": ref_line, "ref_fair": ref_fair}
             flag = "simulator far from market: check news" if abs(ref_pc - ref_fair) >= PROP_GAP_FLAG else ""

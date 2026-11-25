@@ -8,6 +8,23 @@ from unittest import mock
 from sportsedge import access, live
 
 
+_HIST = None
+
+
+def setUpModule():
+    # keep the tests away from the real history folder: the live correction is learned from a file there
+    global _HIST
+    _HIST = tempfile.TemporaryDirectory()
+    os.environ["SPORTSEDGE_HISTORY"] = _HIST.name
+    live._cache.pop("live_slope", None)
+
+
+def tearDownModule():
+    os.environ.pop("SPORTSEDGE_HISTORY", None)
+    live._cache.pop("live_slope", None)
+    _HIST.cleanup()
+
+
 def game(state="in", period=3, clock=360.0, home=70, away=60, sport_home="DEN", sport_away="DAL"):
     return {"event_id": "1", "start": "2026-11-25T03:00Z", "home": sport_home, "away": sport_away, "home_score": float(home),
             "away_score": float(away), "state": state, "detail": "3rd 6:00", "period": period, "clock": clock}
@@ -148,12 +165,13 @@ class BetAsItStands(unittest.TestCase):
         self.assertAlmostEqual(v["value"], v["payout"] * v["p_all"], places=6)  # a half-point line cannot push
         self.assertEqual(v["p_all"], v["legs"][-1]["p_now"])
         self.assertTrue(0.05 < v["p_all"] < 0.95)
+        self.assertAlmostEqual(v["p_nothing"], 1 - v["p_all"])  # a half-point line: it pays in full or not at all
 
     def test_a_lost_leg_ends_it_and_a_push_drops_out(self):
         a, b, c = leg("total", "over", 250.5), leg("total", "over", 230.0), leg("total", "under", 260.5)
         fin = game("post", home=120, away=110)  # total 230
         v = self._view([a, c], {a["key"]: fin, c["key"]: fin}, {"players": {}, "home_wp": None})
-        self.assertEqual((v["status"], v["value"]), ("lost", 0.0))
+        self.assertEqual((v["status"], v["value"], v["p_nothing"]), ("lost", 0.0, 1.0))
         v = self._view([b, c], {b["key"]: fin, c["key"]: fin}, {"players": {}, "home_wp": None})
         self.assertEqual(v["legs"][0]["status"], "push")
         self.assertEqual(v["status"], "won")
@@ -282,6 +300,88 @@ class CashOut(unittest.TestCase):
 
     def test_a_dead_bet_has_nothing_to_cash(self):
         self.assertEqual(live.cash_out(5, 205, 0.0, 1000)["verdict"], "gone")
+
+
+    def test_the_risk_is_counted_even_without_a_bankroll(self):
+        # the Denver slip: $20 back if Denver wins, about a 72% chance, $10 staked
+        c = live.cash_out(13.5, 20, 0.72, None, 0.25, stake=10, p_nothing=0.28, cap=0.03)
+        self.assertTrue(c["bankroll_assumed"])
+        self.assertAlmostEqual(c["bankroll"], 10 / 0.03)
+        self.assertLess(c["risk_value"], c["fair"])
+        self.assertIn("28% chance of getting nothing", c["text"])
+        mine = live.cash_out(13.5, 20, 0.72, 1000, 0.25, stake=10, p_nothing=0.28)
+        self.assertFalse(mine["bankroll_assumed"])  # a bankroll that was set is used as it is
+        self.assertEqual(mine["bankroll"], 1000)
+
+    def test_an_offer_between_the_sure_value_and_the_average_is_cashed(self):
+        c = live.cash_out(0, 20, 0.72, 100, 0.25, stake=10)
+        between = (c["risk_value"] + c["fair"]) / 2
+        r = live.cash_out(between, 20, 0.72, 100, 0.25, stake=10)
+        self.assertEqual(r["verdict"], "reasonable")
+        self.assertIn("getting nothing", r["text"])
+
+    def test_hold_says_where_cashing_out_starts(self):
+        c = live.cash_out(9, 20, 0.72, None, 0.25, stake=10, p_nothing=0.28)
+        self.assertEqual(c["verdict"], "hold")
+        self.assertIn(f"{c['risk_value']:,.2f}", c["text"])
+
+
+class LiveCorrection(unittest.TestCase):
+    """The live chance is corrected by how it has done on finished games."""
+
+    def setUp(self):
+        live._cache.pop("live_slope", None)
+        self.path = live._graded_path()
+
+    def tearDown(self):
+        if self.path.exists():
+            self.path.unlink()
+        live._cache.pop("live_slope", None)
+
+    def _log(self, games, per_game, p_tool, hit_rate):
+        import pandas as pd
+        rows, n = [], 0
+        for g in range(games):
+            for j in range(per_game):
+                won = (n % 20) < round(hit_rate * 20)
+                rows.append({"ts": "2026-11-25T02:00:00+00:00", "sport": "nba", "event_id": str(g), "key": f"NBA|E{g}|pts|over|p{j}",
+                             "selection": "x", "line": j + 0.5, "odds": -110, "other_odds": -110, "p_tool": p_tool, "q_book": 0.5,
+                             "left": 0.5, "now": "1", "result": "won" if won else "lost"})
+                n += 1
+        pd.DataFrame(rows, columns=live.GRADED_COLS).to_csv(self.path, index=False)
+
+    def test_no_log_leaves_the_chance_alone(self):
+        self.assertEqual(live.live_slope(), 1.0)
+        self.assertEqual(live.temper(0.9), 0.9)
+
+    def test_an_overconfident_record_pulls_chances_toward_even(self):
+        self._log(games=15, per_game=4, p_tool=0.85, hit_rate=0.65)
+        a = live.live_slope()
+        self.assertLess(a, 0.8)
+        self.assertTrue(0.5 < live.temper(0.85) < 0.75)
+        self.assertTrue(0.25 < live.temper(0.15) < 0.5)
+        self.assertEqual(live.temper(1.0), 1.0)  # a decided pick stays decided
+
+    def test_a_couple_of_games_count_for_little(self):
+        self._log(games=15, per_game=4, p_tool=0.85, hit_rate=0.65)
+        full = live.live_slope()
+        self.tearDown()
+        self._log(games=2, per_game=30, p_tool=0.85, hit_rate=0.65)
+        few = live.live_slope()
+        self.assertTrue(full < few < 1.0)
+
+    def test_only_picks_in_play_are_corrected(self):
+        inplay, coming = leg("total", "over", 200.5, p=0.5), leg("total", "under", 190.5, p=0.8)
+        coming["key"] = "total|under|b"
+        games = {inplay["key"]: game("in", period=4, clock=300, home=100, away=90), coming["key"]: game("pre")}
+        box = {"players": {}, "home_wp": 0.7}
+        with mock.patch.object(live, "find_game", side_effect=lambda sport, l: games[l["key"]]), \
+                mock.patch.object(live, "boxscore", return_value=box), mock.patch.object(live, "live_slope", return_value=0.5):
+            a, b = live.leg_view(inplay), live.leg_view(coming)
+        self.assertAlmostEqual(a["p_now"], live.temper(a["p_raw"], 0.5))
+        self.assertLess(abs(a["p_now"] - 0.5), abs(a["p_raw"] - 0.5))
+        self.assertEqual(b["p_now"], 0.8)  # before the game: the market's chance, untouched
+        self.assertNotIn("p_raw", b)
 
 
 class PasscodeGate(unittest.TestCase):
